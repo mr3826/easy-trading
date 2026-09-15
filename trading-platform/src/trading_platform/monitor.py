@@ -102,7 +102,18 @@ class SystemMonitor:
             }
 
         now = datetime.now(timezone.utc)
-        age_seconds = (now - self._last_data_timestamp).total_seconds()
+        last_ts = self._last_data_timestamp
+        # Ensure both datetimes are comparable
+        if last_ts is not None:
+            if last_tz := last_ts.tzinfo:
+                # last_ts is timezone-aware, make now comparable
+                if now.tzinfo is None:
+                    now = now.replace(tzinfo=last_ts.tzinfo)
+            else:
+                # last_ts is naive, assume UTC
+                if now.tzinfo is not None:
+                    now = now.replace(tzinfo=None)
+        age_seconds = (now - last_ts).total_seconds() if last_ts is not None else float("inf")
         is_fresh = age_seconds <= max_age_seconds
 
         if not is_fresh:
@@ -163,7 +174,18 @@ class SystemMonitor:
             }
 
         now = datetime.now(timezone.utc)
-        age_seconds = (now - self._last_write_timestamp).total_seconds()
+        last_ts = self._last_write_timestamp
+        # Ensure both datetimes are comparable
+        if last_ts is not None:
+            if last_tz := last_ts.tzinfo:
+                # last_ts is timezone-aware, make now comparable
+                if now.tzinfo is None:
+                    now = now.replace(tzinfo=last_ts.tzinfo)
+            else:
+                # last_ts is naive, assume UTC
+                if now.tzinfo is not None:
+                    now = now.replace(tzinfo=None)
+        age_seconds = (now - last_ts).total_seconds() if last_ts is not None else float("inf")
         # Consider DB healthy if last write was within 5 minutes
         healthy = age_seconds < 300.0
 
@@ -229,7 +251,7 @@ class SystemMonitor:
             "database_health": db,
             "journal_lag": lag,
             "heartbeat_healthy": hb["healthy"],
-            "heartbeat_consecutive_misses": hb["consecutive_misses"],
+            "heartbeat_consecutive_misses": hb.get("consecutive_misses", 0),
             "decision_latencies_sample": self.decision_latencies[-10:] if self.decision_latencies else [],
             "decision_latency_count": len(self.decision_latencies),
         }
@@ -357,7 +379,7 @@ class ShadowSessionOperator:
         V1: Full risk decision, hypothetical order generation, NO broker submission.
         Returns dict with decision, hypothetical order, and monitoring metrics.
         """
-        from trading_platform.domain import Instrument, OrderSide, OrderType, TimeInForce
+        from trading_platform.domain import Instrument, OrderSide, OrderType, TimeInForce, Order, OrderStatus, Signal
 
         # Record signal
         self.monitor.record_signal()
@@ -368,6 +390,14 @@ class ShadowSessionOperator:
         quantity = signal_data.get("quantity", 10)
 
         # Create a provisional order intent
+        signal = Signal(
+            instrument=instrument,
+            side=OrderSide.BUY if signal_data.get("side") == "long" else OrderSide.SELL,
+            quantity=quantity,
+            price=bar_price if bar_price and bar_price > 0 else None,
+            order_type=OrderType.MARKET,
+            time_in_force=TimeInForce.DAY,
+        )
         order = Order(
             order_id=f"would_submit_{signal_data.get('timestamp', 'now')}",
             instrument=instrument,
@@ -376,6 +406,8 @@ class ShadowSessionOperator:
             price=bar_price if bar_price and bar_price > 0 else None,
             order_type=OrderType.MARKET,
             time_in_force=TimeInForce.DAY,
+            status=OrderStatus.SUBMITTED,
+            signal=signal,
         )
 
         # Check risk

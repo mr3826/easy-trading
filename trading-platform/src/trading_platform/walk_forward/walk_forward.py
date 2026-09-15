@@ -25,7 +25,6 @@ from trading_platform.strategies.ma_cross_strategy import (
 from trading_platform.persistence.experiment import (
     ExperimentRecord,
     ExperimentRegistry,
-    compute_dataset_hash,
 )
 
 
@@ -62,6 +61,9 @@ class PeriodSplit:
         self.train_days = train_days
         self.validation_days = validation_days
         self.test_days = test_days
+        self.min_test = min_test
+        self.min_train = min_train
+        self.min_validation = min_validation
 
     # -----------------------------------------------------------------
     # Split a date range

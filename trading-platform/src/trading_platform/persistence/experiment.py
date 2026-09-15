@@ -206,7 +206,7 @@ class ExperimentRegistry:
 
     def __init__(self, root: Path = EXPERIMENTS_ROOT):
         self.root = root
-        self._ensure_root()
+        _ensure_root()
         self._records: Dict[str, ExperimentRecord] = {}
         self._load_existing()
 

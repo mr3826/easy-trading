@@ -12,7 +12,7 @@ class InstrumentType(Enum):
     INDEX = auto()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class Instrument:
     symbol: str
     instrument_type: InstrumentType = InstrumentType.STOCK
@@ -33,7 +33,7 @@ class TradingSession(Enum):
     OVERNIGHT = auto()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class Bar:
     instrument: Instrument
     timestamp: datetime
@@ -49,7 +49,7 @@ class Bar:
         return self.timestamp.astimezone(timezone.utc).strftime("%Y-%m-%d")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class CorporateAction:
     instrument: Instrument
     action_type: str  # "split", "dividend", "reverse_split", "delisting"
@@ -81,7 +81,7 @@ class TimeInForce(Enum):
     FOK = auto()  # Fill or Kill
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class Signal:
     instrument: Instrument
     side: OrderSide
@@ -92,14 +92,14 @@ class Signal:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class OrderIntent:
     signal: Signal
     order_id: str
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class RiskDecision:
     order_intent: OrderIntent
     approved: bool
@@ -109,7 +109,7 @@ class RiskDecision:
     approved_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class Order:
     order_id: str
     instrument: Instrument
@@ -118,7 +118,7 @@ class Order:
     price: Optional[float]
     order_type: OrderType
     time_in_force: TimeInForce
-    status: OrderStatus
+    status: OrderLifecycle
     signal: Signal
     risk_decision: RiskDecision | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -138,14 +138,14 @@ class OrderStatus(Enum):
     EXPIRED = auto()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class OrderLeg:
     leg_id: str
     order: Order
     parent_order_id: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class Execution:
     execution_id: str
     order_id: str
@@ -158,7 +158,7 @@ class Execution:
     trade_id: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class Position:
     instrument: Instrument
     quantity: int
@@ -173,7 +173,7 @@ class Position:
         return self.quantity * self.average_cost
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class PortfolioSnapshot:
     timestamp: datetime
     cash: float
@@ -183,7 +183,7 @@ class PortfolioSnapshot:
     total_pnl: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class BrokerSnapshot:
     timestamp: datetime
     positions: Dict[Instrument, float]
@@ -193,7 +193,7 @@ class BrokerSnapshot:
     status: str = "connected"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class ReconciliationResult:
     timestamp: datetime
     differences: Dict[str, Any]
@@ -205,7 +205,7 @@ class ReconciliationResult:
     blocks_submissions: bool
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class JournalEvent:
     event_id: str
     timestamp: datetime

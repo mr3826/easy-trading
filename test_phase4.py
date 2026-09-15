@@ -1,17 +1,15 @@
-"""Test script for Phase 4 modules."""
+"""Phase 4 tests for the AI Trading Platform."""
 from trading_platform.strategies.ma_cross_strategy import (
     MaCrossHypothesis,
     generate_signal,
     hypothesis_to_dict,
     dict_to_hypothesis,
 )
-from trading_platform.risk.limit import check_position_limit, check_buying_power
-from trading_platform.domain import Instrument
+from trading_platform.risk.limits import check_position_limit, check_buying_power
+from trading_platform.domain import Instrument, Position
 from trading_platform.persistence.experiment import (
     ExperimentRecord,
     ExperimentRegistry,
-    compute_dataset_hash,
-    compute_code_hash,
 )
 from trading_platform.persistence.baseline_report import (
     EngineeringBaselineReport,
@@ -43,8 +41,6 @@ def test_hypothesis():
     assert h.fast_length == h2.fast_length
     assert h.slow_length == h2.slow_length
 
-    print("PASS: test_hypothesis")
-
 
 def test_position_limit():
     """Test position limit checking."""
@@ -64,8 +60,6 @@ def test_position_limit():
     ok3, reason3 = check_position_limit(1, pos_dict, Instrument(symbol="GOOGL"))
     assert ok3 is True
 
-    print("PASS: test_position_limit")
-
 
 def test_buying_power():
     """Test buying power check."""
@@ -79,13 +73,9 @@ def test_buying_power():
     assert ok2 is False
     assert "Insufficient" in reason2
 
-    print("PASS: test_buying_power")
-
 
 def test_experiment_record():
     """Test ExperimentRecord creation and registry."""
-    from trading_platform.strategies.ma_cross_strategy import MaCrossHypothesis
-
     h = MaCrossHypothesis(fast_length=5, slow_length=20)
     seed = 42
     reg = ExperimentRegistry()
@@ -94,9 +84,9 @@ def test_experiment_record():
     rec = ExperimentRecord(
         experiment_id=exp_id,
         hypothesis=h,
-        dataset_hash=compute_dataset_hash("test_data"),
+        dataset_hash=ExperimentRecord.compute_dataset_hash("test_data"),
         universe_version="v1.0",
-        code_commit=compute_code_hash(),
+        code_commit=ExperimentRecord.compute_code_hash(),
         dependency_lock="dep-lock-123",
         cost_slippage_assumptions={"commission": 1.0, "slippage_pct": 0.001},
         seed=seed,
@@ -108,8 +98,6 @@ def test_experiment_record():
     assert loaded.hypothesis.hypothesis_id == h.hypothesis_id
     assert loaded.result_metrics["return"] == 0.05
 
-    print("PASS: test_experiment_record")
-
 
 def test_metrics():
     """Test performance metrics computation."""
@@ -120,7 +108,9 @@ def test_metrics():
 
     exp = compute_expectancy(ew, lw)
     assert exp is not None
-    assert abs(exp - 8.0) < 0.001  # (3/5 * 20) - (2/5 * 10) = 12 - 4 = 8
+    # expectancy = (3/5 * 20) - (2/5 * -10) = 12 + 4 = 16
+    # (win_rate * avg_win) - (loss_rate * avg_loss) with losses [-5, -15]
+    assert abs(exp - 16.0) < 0.001
 
     pf = compute_profit_factor(ew, lw)
     assert pf is not None
@@ -137,54 +127,36 @@ def test_metrics():
     assert wl["losses"] == 2
     assert wl["total"] == 5
 
-    print("PASS: test_metrics")
-
 
 def test_concentration():
     """Test concentration computation."""
-    import datetime
+    from trading_platform.domain import Position
 
     positions = {
-        "AAPL": {
-            "instrument": Instrument(symbol="AAPL"),
-            "quantity": 10,
-            "average_cost": 100.0,
-            "market_value": 1000.0,
-            "unrealized_pnl": 0.0,
-            "realized_pnl": 0.0,
-            "last_update": datetime.datetime.now(),
-        },
-        "MSFT": {
-            "instrument": Instrument(symbol="MSFT"),
-            "quantity": 5,
-            "average_cost": 200.0,
-            "market_value": 1000.0,
-            "unrealized_pnl": 0.0,
-            "realized_pnl": 0.0,
-            "last_update": datetime.datetime.now(),
-        },
+        "AAPL": Position(
+            instrument=Instrument(symbol="AAPL"),
+            quantity=10,
+            average_cost=100.0,
+            market_value=1000.0,
+            unrealized_pnl=0.0,
+            realized_pnl=0.0,
+            last_update="2024-01-01T00:00:00",
+        ),
+        "MSFT": Position(
+            instrument=Instrument(symbol="MSFT"),
+            quantity=5,
+            average_cost=200.0,
+            market_value=1000.0,
+            unrealized_pnl=0.0,
+            realized_pnl=0.0,
+            last_update="2024-01-01T00:00:00",
+        ),
     }
 
     # simplify: just check the function can run
-    # with raw dicts since Position is a dataclass
+    # with Position dataclass objects
     conc = compute_concentration(positions)
     assert "herfindahl_index" in conc
     assert "top_symbol" in conc
     assert "top_pct" in conc
     assert conc["top_symbol"] in ("AAPL", "MSFT")
-
-    print("PASS: test_concentration")
-
-
-def main():
-    test_hypothesis()
-    test_position_limit()
-    test_buying_power()
-    test_experiment_record()
-    test_metrics()
-    test_concentration()
-    print("\nAll Phase 4 tests passed!")
-
-
-if __name__ == "__main__":
-    main()

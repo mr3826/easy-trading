@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple, Any
 
 from trading_platform.domain import Instrument, OrderSide, Order, OrderStatus
-from trading_platform.risk.limit import (
+from trading_platform.risk.limits import (
     check_position_limit,
     check_sector_concentration,
     check_gross_exposure,
@@ -297,6 +297,15 @@ class HardRiskEngine:
             # Reconstruct RiskPolicyVersion from dict
             from trading_platform.risk.risk_engine import RiskPolicyVersion
 
+            eff_from = p_dict.get("effective_from")
+            if eff_from is None:
+                effective_from = None
+            elif isinstance(eff_from, datetime):
+                effective_from = eff_from
+            else:
+                effective_from = datetime.fromisoformat(
+                    eff_from.isoformat() if hasattr(eff_from, 'isoformat') else str(eff_from)
+                )
             pv = RiskPolicyVersion(
                 version=p_dict.get("version", 1),
                 max_positions=p_dict.get("max_positions", 3),
@@ -305,13 +314,10 @@ class HardRiskEngine:
                 max_drawdown_pct=p_dict.get("max_drawdown_pct", 10.0),
                 max_turnover_pct=p_dict.get("max_turnover_pct", 20.0),
                 min_cash_reserve_pct=p_dict.get("min_cash_reserve_pct", 5.0),
-                effective_from=datetime.fromisoformat(
-                    p_dict.get("effective_from", datetime.now(timezone.utc).isoformat())
-                )
-                if p_dict.get("effective_from")
-                else None,
+                effective_from=effective_from,
                 description=p_dict.get("description", ""),
             )
+            self.policy_history.insert(0, pv)
             self.policy_history.insert(0, pv)
         if self.policy_history:
             self.active_policy = self.policy_history[0]
@@ -398,7 +404,7 @@ class ReconciliationEngine:
         # Simple reconciliation using OMS state
         # ending_cash = beginning_cash - commission - slippage + realized_pnl
         # For now, check consistency of OMS cash state
-        if hasattr(self.oms, "orders") and self.orders:
+        if hasattr(self.oms, "orders") and self.oms.orders:
             # Calculate from filled orders
             total_commission = 1.0  # placeholder
             total_slippage = 0.0  # placeholder
@@ -573,8 +579,10 @@ class ReconciliationEngine:
             for sym, qty in positions_snapshot.items()
         )
         # Compare OMS position market values
+        # positions_snapshot values may be floats or dicts with market_value key
         oms_position_mv = sum(
-            abs(pos.get("market_value", 0.0)) for pos in positions_snapshot.values()
+            abs(pos.get("market_value", 0.0) if isinstance(pos, dict) else pos)
+            for pos in positions_snapshot.values()
         ) if isinstance(positions_snapshot, dict) else 0.0
 
         pos_ok = abs(oms_position_mv - expected_market_value) / max(
@@ -868,7 +876,7 @@ class SessionScheduler:
             broker_orders,
         )
 
-        if not results["overall_status"] == "PASS":
+        if not result["overall_status"] == "PASS":
             self.is_trading_halted = True
             return {
                 "status": "TRADING_HALTED",
@@ -877,7 +885,7 @@ class SessionScheduler:
             }
 
         self.startup_reconciliation_done = True
-        return {"status": "STARTUP_OK", "reconciliation": results}
+        return {"status": "STARTUP_OK", "reconciliation": result}
 
     def check_market_calendar(self, market_open: bool, calendar_valid: bool) -> Dict[str, any]:
         """Check market/calendar validity.
