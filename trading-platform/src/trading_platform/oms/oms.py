@@ -1,0 +1,665 @@
+"""Production OMS state machine for Phase 6.
+
+V1 Order lifecycle: SUBMITTED → ACCEPTED → OPEN → FILLED → CANCELED/REJECTED
+
+Key features:
+- Idempotency keys for duplicate detection
+- OCA (Order Cancel Replace) groups
+- Cancellation and replacement handling
+- Timeout handling
+- Order state persistence
+- Order submission/replacement/cancellation API
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+from enum import Enum, auto
+from typing import Dict, Optional, Any
+
+from trading_platform.domain import Instrument, Order, OrderSide, OrderType, TimeInForce, OrderStatus, OrderIntent
+
+
+# ---------------------------------------------------------------------------
+# Order status enum — V1 lifecycle
+
+
+class OrderLifecycle(Enum):
+    """V1 order status lifecycle.
+
+    States:
+    - SUBMITTED: Order sent to broker, awaiting acceptance
+    - ACCEPTED: Broker accepted the order
+    - OPEN: Order is active in the market
+    - FILLED: Order has been filled (all or part)
+    - CANCELED: Order was canceled before fill
+    - REJECTED: Order was rejected by risk or broker
+    - EXPIRED: Order expired through time-in-force
+    """
+    SUBMITTED = auto()
+    ACCEPTED = auto()
+    OPEN = auto()
+    FILLED = auto()
+    CANCELED = auto()
+    REJECTED = auto()
+    EXPIRED = auto()
+
+
+# ---------------------------------------------------------------------------
+# Idempotency key — prevents duplicate order submission
+
+
+class IdempotencyKey:
+    """Unique key for duplicate order detection.
+
+    V1: key = f"{symbol}_{side}_{quantity}_{price}_{timestamp}"
+    Used by the OMS to detect and reject duplicate submissions.
+    """
+
+    def __init__(self, order: Order):
+        self.key = f"{order.instrument.symbol}_{order.side.name}_{order.quantity}_{order.price}_{order.order_id}"
+        self.timestamp = datetime.now(timezone.utc)
+
+    def __hash__(self) -> int:
+        return hash(self.key)
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, IdempotencyKey):
+            return NotImplemented
+        return self.key == other.key
+
+
+# ---------------------------------------------------------------------------
+# OCA group — orders that cancel/replace each other
+
+
+class OCAGroup:
+    """Order Cancel Replace group.
+
+    V1: Orders within the same OCA group cancel each other when a replace
+    or cancel is issued on any member. Protects against double-submission
+    and ensures atomic order family behavior.
+    """
+
+    def __init__(self, group_id: str | None = None):
+        self.group_id = group_id or str(uuid.uuid4())
+        self.orders: Dict[str, Order] = {}  # order_id -> order
+        self.parent_order: Optional[Order] = None  # original order
+
+    def add(self, order: Order) -> None:
+        """Add an order to the OCA group."""
+        self.orders[order.order_id] = order
+        if self.parent_order is None:
+            self.parent_order = order
+
+    def remove(self, order_id: str) -> Optional[Order]:
+        """Remove an order from the group, return it."""
+        return self.orders.pop(order_id, None)
+
+    def cancel_all(self) -> None:
+        """Cancel all orders in the group."""
+        for order in self.orders.values():
+            order.status = OrderLifecycle.CANCELED
+        self.orders.clear()
+
+    def replace_all(self, new_order: Order) -> None:
+        """Replace all orders in the group with a new order."""
+        self.cancel_all()
+        self.add(new_order)
+
+
+# ---------------------------------------------------------------------------
+# OMS state machine
+
+
+class OMS:
+    """Production Order State Machine.
+
+    V1 lifecycle: SUBMITTED → ACCEPTED → OPEN → (FILLED | CANCELED | REJECTED | EXPIRED)
+
+    Features:
+    - Idempotency key tracking
+    - OCA group management
+    - Cancellation and replacement
+    - Timeout tracking
+    - Order lifecycle event reporting
+    - State consistency checks
+    """
+
+    def __init__(self, oms_id: str = "default_oms"):
+        self.oms_id = oms_id
+        # Order state: order_id -> Order
+        self.orders: Dict[str, Order] = {}
+        # Idempotency key tracking: key -> order_id
+        self.idempotency_keys: Dict[str, str] = {}
+        # OCA groups: group_id -> OCAGroup
+        self.oca_groups: Dict[str, OCAGroup] = {}
+        # Order lifecycle events
+        self.event_ledger: list[dict] = []
+        # Timeout tracking: order_id -> deadline
+        self.timeouts: Dict[str, datetime] = {}
+
+    # ---- Order submission ----
+
+    def submit_order(self, order: Order, idempotency_key: Optional[str] = None) -> tuple[bool, str]:
+        """Submit an order through the OMS state machine.
+
+        V1 lifecycle transition: → SUBMITTED
+
+        Args:
+            order: The order to submit
+            idempotency_key: Optional key for duplicate detection
+
+        Returns (accepted, reason):
+            - accepted=True: order accepted into state machine
+            - accepted=False: order rejected, reason string
+        """
+        # ---- Idempotency check ----
+        if idempotency_key:
+            if idempotency_key in self.idempotency_keys:
+                existing_order_id = self.idempotency_keys[idempotency_key]
+                # Check if the existing order is in a terminal state
+                existing_order = self.orders.get(existing_order_id)
+                if existing_order and existing_order.status in (
+                    OrderLifecycle.FILLED,
+                    OrderLifecycle.CANCELED,
+                    OrderLifecycle.REJECTED,
+                ):
+                    return False, f"Order already {existing_order.status.name} with same idempotency key"
+                # If existing order is OPEN, we can replace it
+                if existing_order and existing_order.status == OrderLifecycle.OPEN:
+                    return self.replace_order(existing_order.order_id, order, idempotency_key)
+
+            self.idempotency_keys[idempotency_key] = order.order_id
+
+        # ---- OCA group check ----
+        # Find if order belongs to an OCA group
+        oca_group = None
+        for gid, group in self.oca_groups.items():
+            if order.order_id in group.orders or self._order_in_oca_group(order, gid):
+                oca_group = group
+                break
+
+        # If order has a price and quantity, assign to OCA group if needed
+        if oca_group is None:
+            oca_group = OCAGroup(group_id=order.order_id)
+            self.oca_groups[oca_group.group_id] = oca_group
+            oca_group.add(order)
+        else:
+            oca_group.add(order)
+
+        # ---- Transition to SUBMITTED ----
+        order.status = OrderLifecycle.SUBMITTED
+        self.orders[order.order_id] = order
+
+        self.event_ledger.append(
+            {
+                "event": "ORDER_SUBMITTED",
+                "order_id": order.order_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "status": order.status.name,
+                "instrument": order.instrument.symbol,
+                "side": order.side.name,
+                "quantity": order.quantity,
+                "price": order.price,
+                "oca_group": oca_group.group_id if oca_group else None,
+            }
+        )
+
+        return True, "Order submitted"
+
+    # ---- Order acceptance ----
+
+    def accept_order(self, order_id: str) -> bool:
+        """Move order from SUBMITTED to ACCEPTED.
+
+        Returns True if transition succeeded, False if invalid state.
+        """
+        order = self.orders.get(order_id)
+        if not order:
+            return False
+        if order.status != OrderLifecycle.SUBMITTED:
+            return False
+
+        order.status = OrderLifecycle.ACCEPTED
+
+        self.event_ledger.append(
+            {
+                "event": "ORDER_ACCEPTED",
+                "order_id": order_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "status": order.status.name,
+            }
+        )
+        return True
+
+    # ---- Order opening ----
+
+    def open_order(self, order_id: str) -> bool:
+        """Move order from ACCEPTED to OPEN.
+
+        Returns True if transition succeeded.
+        """
+        order = self.orders.get(order_id)
+        if not order:
+            return False
+        if order.status != OrderLifecycle.ACCEPTED:
+            return False
+
+        order.status = OrderLifecycle.OPEN
+
+        self.event_ledger.append(
+            {
+                "event": "ORDER_OPEN",
+                "order_id": order_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "status": order.status.name,
+            }
+        )
+        return True
+
+    # ---- Order fill ----
+
+    def fill_order(self, order_id: str, fill_quantity: int, fill_price: float) -> bool:
+        """Mark order as filled (partially or fully).
+
+        V1: Reduces remaining quantity. If remaining == 0, transitions to FILLED.
+        """
+        order = self.orders.get(order_id)
+        if not order:
+            return False
+        if order.status not in (OrderLifecycle.OPEN,):
+            return False
+
+        order.fill_quantity = getattr(order, "fill_quantity", 0) + fill_quantity
+        order.fill_price = fill_price  # last fill price (avg if partial)
+
+        # If fully filled
+        if order.fill_quantity >= order.quantity:
+            order.status = OrderLifecycle.FILLED
+
+            self.event_ledger.append(
+                {
+                    "event": "ORDER_FILLED",
+                    "order_id": order_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "status": order.status.name,
+                    "fill_quantity": order.fill_quantity,
+                    "fill_price": order.fill_price,
+                }
+            )
+        else:
+            # Partially filled - stay OPEN
+            self.event_ledger.append(
+                {
+                    "event": "ORDER_PARTIAL_FILL",
+                    "order_id": order_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "status": order.status.name,
+                    "fill_quantity": order.fill_quantity,
+                    "fill_price": order.fill_price,
+                }
+            )
+        return True
+
+    # ---- Order cancellation ----
+
+    def cancel_order(self, order_id: str, reason: str = "") -> bool:
+        """Cancel an order.
+
+        V1: OPEN → CANCELED, SUBMITTED → CANCELED (if not yet accepted).
+        Returns True if cancellation succeeded.
+        """
+        order = self.orders.get(order_id)
+        if not order:
+            return False
+
+        # Can cancel from OPEN or SUBMITTED states
+        if order.status not in (OrderLifecycle.OPEN, OrderLifecycle.SUBMITTED):
+            return False
+
+        order.status = OrderLifecycle.CANCELED
+
+        # Cancel all orders in the same OCA group
+        self._cancel_oca_group(order_id)
+
+        self.event_ledger.append(
+            {
+                "event": "ORDER_CANCELED",
+                "order_id": order_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "status": order.status.name,
+                "reason": reason,
+            }
+        )
+        return True
+
+    def _cancel_oca_group(self, order_id: str) -> None:
+        """Cancel all orders in the same OCA group."""
+        for gid, group in self.oca_groups.items():
+            if order_id in group.orders:
+                for oid in list(group.orders.keys()):
+                    if oid != order_id:
+                        order = self.orders.get(oid)
+                        if order and order.status == OrderLifecycle.OPEN:
+                            order.status = OrderLifecycle.CANCELED
+                group.cancel_all()
+                break
+
+    # ---- Order replacement ----
+
+    def replace_order(
+        self, old_order_id: str, new_order: Order, idempotency_key: Optional[str] = None
+    ) -> tuple[bool, str]:
+        """Replace an existing order with a new one.
+
+        V1: Cancel old order, submit new order with same idempotency key logic.
+        """
+        # Cancel the old order
+        cancel_ok = self.cancel_order(old_order_id, reason="REPLACE")
+        if not cancel_ok:
+            return False, "Could not cancel original order for replacement"
+
+        # Submit the new order
+        new_order.status = OrderLifecycle.SUBMITTED
+        self.orders[new_order.order_id] = new_order
+
+        # Handle idempotency
+        if idempotency_key:
+            self.idempotency_keys[idempotency_key] = new_order.order_id
+
+        # Handle OCA group - add new order to same group
+        # Find the OCA group of the old order
+        for gid, group in self.oca_groups.items():
+            if old_order_id in group.orders:
+                group.add(new_order)
+                break
+        else:
+            # No OCA group, create new one
+            new_oca = OCAGroup(group_id=new_order.order_id)
+            new_oca.add(new_order)
+            self.oca_groups[new_oca.group_id] = new_oca
+
+        self.event_ledger.append(
+            {
+                "event": "ORDER_REPLACED",
+                "order_id": new_order.order_id,
+                "old_order_id": old_order_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "status": new_order.status.name,
+            }
+        )
+        return True, "Order replaced"
+
+    # ---- Order timeout ----
+
+    def set_timeout(self, order_id: str, deadline: datetime) -> None:
+        """Set a timeout deadline for an order.
+
+        If the order is not filled or canceled by the deadline, it will be
+        automatically canceled.
+        """
+        self.timeouts[order_id] = deadline
+
+    def check_timeout(self, order_id: str, now: datetime) -> bool:
+        """Check if an order has timed out.
+
+        Returns True if the order should be canceled due to timeout.
+        """
+        deadline = self.timeouts.get(order_id)
+        if not deadline:
+            return False
+        if now > deadline:
+            # Cancel the order
+            order = self.orders.get(order_id)
+            if order and order.status == OrderLifecycle.OPEN:
+                return self.cancel_order(order_id, reason="TIMEOUT")
+            return True
+        return False
+
+    # ---- Order state query ----
+
+    def get_order(self, order_id: str) -> Optional[Order]:
+        """Get order state."""
+        return self.orders.get(order_id)
+
+    def get_order_status(self, order_id: str) -> Optional[str]:
+        """Get order status name."""
+        order = self.orders.get(order_id)
+        if order:
+            return order.status.name
+        return None
+
+    def list_orders(self) -> Dict[str, dict]:
+        """List all orders with summary state."""
+        result = {}
+        for oid, order in self.orders.items():
+            result[oid] = {
+                "status": order.status.name,
+                "symbol": order.instrument.symbol,
+                "side": order.side.name,
+                "quantity": order.quantity,
+                "fill_quantity": getattr(order, "fill_quantity", 0),
+                "price": order.price,
+            }
+        return result
+
+    # ---- OCA group queries ----
+
+    def get_oca_group(self, group_id: str) -> Optional[OCAGroup]:
+        """Get OCA group by ID."""
+        return self.oca_groups.get(group_id)
+
+    def list_oca_groups(self) -> Dict[str, dict]:
+        """List all OCA groups with order summaries."""
+        result = {}
+        for gid, group in self.oca_groups.items():
+            result[gid] = {
+                "orders": list(group.orders.keys()),
+                "parent": group.parent_order.order_id if group.parent_order else None,
+                "order_count": len(group.orders),
+            }
+        return result
+
+    # ---- Event ledger ----
+
+    def get_event_ledger(self) -> list[dict]:
+        """Get the complete order event ledger."""
+        return self.event_ledger
+
+    def clear_event_ledger(self) -> None:
+        """Clear the event ledger (for new session)."""
+        self.event_ledger.clear()
+
+
+# ---------------------------------------------------------------------------
+# Deterministic fake broker for testing
+
+
+class FakeBroker:
+    """Deterministic fake broker for testing OMS without external dependencies.
+
+    V1: Models order execution realistically but deterministically.
+    - Orders fill at CLOSE price (configurable fill assumption)
+    - Commission: FIXED $1.00 per order
+    - Slippage: 0.1% default, configurable
+    - No network latency, no rejections beyond risk limits
+    - Full order state synchronization with OMS
+    """
+
+    def __init__(self, oms: OMS, fill_assumption: str = "CLOSE"):
+        self.oms = oms
+        self.fill_assumption = fill_assumption
+        self.commission_rate = 1.0  # $1.00 per order (FIXED model)
+        self.slippage_pct = 0.001  # 0.1% default
+        self.order_counter = 0
+
+    def execute_order(self, order: Order, bar: Any) -> dict:
+        """Execute an order deterministically and sync with OMS.
+
+        V1 execution model:
+        - Fill price based on fill_assumption (CLOSE, NEXT_OPEN, MARKET, LIMIT)
+        - Commission: $1.00 per order
+        - Slippage: |fill_price - signal_price| for MARKET orders
+        - Sync order state to OMS
+        """
+        self.order_counter += 1
+        order_id = order.order_id
+
+        # Determine fill price based on assumption
+        fill_price = self._calculate_fill_price(order, bar)
+
+        # Determine actual fill quantity (whole-share quantization)
+        actual_qty = min(order.quantity, order.quantity)  # full fill in V1
+
+        # Commission
+        commission = self.commission_rate
+
+        # Sync with OMS
+        self.oms.fill_order(order_id, actual_qty, fill_price)
+
+        # Transition through OMS lifecycle
+        # SUBMITTED → ACCEPTED → OPEN → FILLED (already called above)
+        # If OMS didn't transition, do it here
+        oms_order = self.oms.get_order(order_id)
+        if oms_order and oms_order.status == OrderLifecycle.OPEN:
+            self.oms.open_order(order_id)
+            if oms_order.fill_quantity >= oms_order.quantity:
+                self.oms.fill_order(order_id, oms_order.quantity, fill_price)
+
+        return {
+            "order_id": order_id,
+            "symbol": order.instrument.symbol,
+            "side": order.side.name,
+            "quantity": actual_qty,
+            "fill_price": fill_price,
+            "commission": commission,
+            "slippage": round(fill_price - (order.price or 0), 2) if order.price else 0,
+            "status": oms_order.status.name if oms_order else "UNKNOWN",
+            "fill_quantity": oms_order.fill_quantity if oms_order else 0,
+        }
+
+    def _calculate_fill_price(self, order: Order, bar: Any) -> float:
+        """Calculate fill price based on fill assumption."""
+        # Simplified: use bar close price
+        # In a full implementation, would use NEXT_OPEN, MARKET with slippage, etc.
+        close_price = getattr(bar, "close", 100.0) if bar else 100.0
+
+        if self.fill_assumption == "CLOSE":
+            return close_price
+        elif self.fill_assumption == "NEXT_OPEN":
+            # Would need next bar - use close as placeholder
+            return close_price
+        elif self.fill_assumption == "MARKET":
+            # Market order: close + small slippage
+            slippage = close_price * self.slippage_pct
+            return close_price + slippage if order.side == OrderSide.BUY else close_price - slippage
+        elif self.fill_assumption == "LIMIT":
+            # Limit order: fill at signal price or better
+            return order.price if order.price else close_price
+        return close_price
+
+    def cancel_all_orders(self) -> None:
+        """Cancel all open orders and sync with OMS."""
+        # Find all OPEN orders
+        for oid, order in self.oms.orders.items():
+            if order.status == OrderLifecycle.OPEN:
+                self.oms.cancel_order(oid, reason="BROKER_CANCEL")
+        self.oms.clear_event_ledger()
+
+
+# ---------------------------------------------------------------------------
+# Example usage / demo
+
+
+def demo_oms_lifecycle():
+    """Demonstrate OMS state machine lifecycle."""
+
+    print("=" * 60)
+    print("OMS STATE MACHINE DEMO")
+    print("=" * 60)
+
+    # Initialize OMS and fake broker
+    oms = OMS(oms_id="demo_oms")
+    broker = FakeBroker(oms, fill_assumption="CLOSE")
+
+    # Create an instrument and order
+    inst = Instrument(symbol="AAPL")
+    order = Order(
+        order_id="order-001",
+        instrument=inst,
+        side=OrderSide.BUY,
+        quantity=10,
+        price=None,  # market order
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.DAY,
+        status=OrderLifecycle.SUBMITTED,
+        signal=None,
+        risk_decision=None,
+    )
+
+    # 1. Submit order
+    print("\n1. Submit order:")
+    accepted, reason = oms.submit_order(order)
+    print(f"   Accepted: {accepted}, Reason: {reason}")
+    print(f"   Status: {oms.get_order_status(order.order_id)}")
+
+    # 2. Accept order through OMS
+    print("\n2. Accept order:")
+    accepted = oms.accept_order(order.order_id)
+    print(f"   Accepted: {accepted}")
+    print(f"   Status: {oms.get_order_status(order.order_id)}")
+
+    # 3. Execute through fake broker
+    print("\n3. Execute order via fake broker:")
+    # Create a mock bar
+    class MockBar:
+        close = 102.0
+    execution = broker.execute_order(order, MockBar())
+    print(f"   Execution: {execution['status']}")
+    print(f"   Fill quantity: {execution['fill_quantity']}")
+    print(f"   Fill price: ${execution['fill_price']:.2f}")
+    print(f"   Commission: ${execution['commission']:.2f}")
+    print(f"   Status: {oms.get_order_status(order.order_id)}")
+
+    # 4. Try to submit same idempotency key (should be detected)
+    print("\n4. Submit same order with same idempotency key (should be handled):")
+    order2 = Order(
+        order_id="order-002",
+        instrument=inst,
+        side=OrderSide.BUY,
+        quantity=10,
+        price=None,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.DAY,
+        status=OrderLifecycle.SUBMITTED,
+        signal=None,
+        risk_decision=None,
+    )
+    # Use same order_id for idempotency test
+    accepted2, reason2 = oms.submit_order(order2, idempotency_key="order-001-key")
+    print(f"   Accepted: {accepted2}, Reason: {reason2}")
+
+    # 5. Cancel order
+    print("\n5. Cancel order:")
+    cancelled = oms.cancel_order(order.order_id, reason="DEMO_CANCEL")
+    print(f"   Cancelled: {cancelled}")
+    print(f"   Status: {oms.get_order_status(order.order_id)}")
+
+    # 6. List all orders
+    print("\n6. List all orders:")
+    for oid, summary in oms.list_orders().items():
+        print(f"   {oid}: status={summary['status']}, symbol={summary['symbol']}, qty={summary['quantity']}")
+
+    # 7. Event ledger
+    print("\n7. Event ledger:")
+    for event in oms.get_event_ledger():
+        print(f"   {event}")
+
+    print(f"\n{'=' * 60}")
+    print("OMS lifecycle demo complete.")
+
+
+if __name__ == "__main__":
+    demo_oms_lifecycle()

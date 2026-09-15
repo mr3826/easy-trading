@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "trading-platform"
+version = "1.0.0"
+description = "AI Trading Platform — Phase-by-Phase Execution Plan"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.7.0",
+    "postgresql>=asyncpg",
+    "parquet-format>=3.0.0",
+]
+
+[project.tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 88
+select = "E,F,I,S,K,Q,W,C90,C99"
+skip = ["migrations/*", "tests/fixture/*"]
+mode = "check"
+
+[tool.mypy]
+python_version = "3.12"
+disallow_untyped_definitions = true
+disallow_any_generics = true
+
+[tool.pytest]
+testpaths = ["tests"]
+addopts = "--tb=short -q"
+maxfail = 50
+log_cli = true
+markers = [
+    "gate(name): mark test as belonging to a promotion gate",
+]
+
+[tool.pre-commit]
+repo = "local"
+hooks = [
+    { id = "git-check-tip" },
+]
