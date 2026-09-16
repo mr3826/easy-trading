@@ -3,7 +3,7 @@
 **Audit timestamp:** 2026-09-16T00:39:22Z baseline; final verification recorded after implementation.
 **Starting branch:** `fix/verified-platform-foundation`
 **Starting commit:** `9b461b5`
-**Final remote feature head:** `1f32cb9`; **main baseline:** `323a701`
+**Final verified source head:** `73b8250`; **main baseline:** `323a701`
 
 ## Baseline Evidence
 
