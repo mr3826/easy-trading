@@ -1,13 +1,13 @@
-commit=b607b6c5e6e13f9994a06067a3865103cd134798
+commit=e2f8e93fbfdbc0d73c7873539ed2b04b5f18ec07
 command=uv run pytest -m "not external" --cov=trading_platform --cov-report=term-missing --cov-report=xml:artifacts/verification/coverage.xml --junitxml=artifacts/verification/test-results.xml
-utc=2026-09-16T18:29:38.329834+00:00
+utc=2026-09-16T18:42:55.309646+00:00
 platform=nt
 python=Python 3.14.3
 uv=uv 0.10.9 (f675560f3 2026-03-06)
 exit_code=0
 
-........................................................................ [ 93%]
-.....                                                                    [100%]
+........................................................................ [ 91%]
+.......                                                                  [100%]
 =============================== tests coverage ================================
 _______________ coverage: platform win32, python 3.14.3-final-0 _______________
 
@@ -17,16 +17,18 @@ trading-platform\src\trading_platform\__init__.py                               
 trading-platform\src\trading_platform\authorization.py                           29      2    93%   34, 56
 trading-platform\src\trading_platform\backup.py                                  23      3    87%   33, 42, 45
 trading-platform\src\trading_platform\broker_adapter.py                         101     26    74%   92, 123, 127, 145-148, 156, 163-165, 204-222, 260, 263, 269, 273
-trading-platform\src\trading_platform\chaos_engine.py                           153     24    84%   119, 142-144, 156-158, 163-172, 190, 199-201, 245, 249, 251, 255, 257, 311, 314-315, 335
+trading-platform\src\trading_platform\chaos_engine.py                           176     27    85%   126, 134, 136, 153, 176-178, 190-192, 197-206, 224, 233-235, 279, 283, 285, 289, 291, 345, 348-349, 369
 trading-platform\src\trading_platform\cli\__init__.py                            10     10     0%   3-20
 trading-platform\src\trading_platform\config.py                                  15      0   100%
 trading-platform\src\trading_platform\data\__init__.py                          101     21    79%   64, 68, 72, 76, 91, 95, 99, 103, 147, 174-175, 179, 198, 201, 204, 207, 210, 213, 232-233, 249
 trading-platform\src\trading_platform\data\ingestion\__init__.py                  2      0   100%
 trading-platform\src\trading_platform\data\ingestion\daily_bar_ingestion.py      82     14    83%   58, 76, 91-92, 97, 117-121, 132, 173, 184, 218
+trading-platform\src\trading_platform\dead_man.py                                21      8    62%   16, 22-28, 32
 trading-platform\src\trading_platform\domain\__init__.py                        207     10    95%   26, 33, 59, 61, 115, 155, 157, 207, 259, 264
 trading-platform\src\trading_platform\features\__init__.py                       38      1    97%   56
+trading-platform\src\trading_platform\ml_pipeline.py                             99      8    92%   26, 30, 77, 83, 87, 90, 136-137
 trading-platform\src\trading_platform\ml_ranking.py                             196     39    80%   59-61, 64, 83-85, 235, 237, 239, 241, 261-267, 309, 326-327, 344-345, 363-364, 374-375, 378-379, 383-390, 435, 460-465, 485
-trading-platform\src\trading_platform\monitor.py                                135     21    84%   76, 109-113, 118, 178-182, 188, 207-208, 254, 295-297, 302-304, 319, 326, 330, 334, 437
+trading-platform\src\trading_platform\monitor.py                                169     22    87%   51, 138, 171-175, 180, 240-244, 250, 269-270, 316, 357-359, 364-366, 381, 388, 392, 396, 499
 trading-platform\src\trading_platform\observability\__init__.py                  14      1    93%   22
 trading-platform\src\trading_platform\oms\oms.py                                216     21    90%   55, 94-95, 155, 217, 267, 338-340, 356, 370-371, 412-413, 432, 446, 548, 562-565
 trading-platform\src\trading_platform\persistence\__init__.py                     0      0   100%
@@ -43,6 +45,6 @@ trading-platform\src\trading_platform\simulator\event_driven_simulator.py       
 trading-platform\src\trading_platform\strategies\ma_cross_strategy.py            40      7    82%   58, 87, 93, 99, 104, 110, 130
 trading-platform\src\trading_platform\walk_forward\walk_forward.py              183     40    78%   87, 130, 226-236, 245-255, 263-273, 322-326, 338-340, 355-367, 398
 -----------------------------------------------------------------------------------------------------------
-TOTAL                                                                          2700    408    85%
+TOTAL                                                                          2877    428    85%
 Coverage XML written to file artifacts/verification/coverage.xml
-77 passed in 3.24s
+79 passed in 7.32s
