@@ -78,6 +78,8 @@ class MLTrainingPipeline:
         ordered = sorted(examples, key=lambda example: example.timestamp)
         if list(examples) != ordered:
             raise ModelInputRejected("training examples must be chronological")
+        if any(previous.timestamp >= current.timestamp for previous, current in zip(ordered, ordered[1:])):
+            raise ModelInputRejected("training timestamps must be strictly increasing")
         feature_names = tuple(sorted(ordered[0].features))
         if not feature_names or any(set(example.features) != set(feature_names) for example in ordered):
             raise ModelInputRejected("feature schema is inconsistent")

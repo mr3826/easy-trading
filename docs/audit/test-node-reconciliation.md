@@ -4,10 +4,10 @@
 
 - Baseline source inventory: `artifacts/verification/test-inventory-before.txt`, generated from `git grep` at starting commit `9b461b5`; 47 exact function nodes.
 - Intermediate explicit inventory: `5353cc1:artifacts/verification/test-inventory-after.txt`; 34 nodes.
-- Current explicit inventory: `artifacts/verification/test-inventory-current.txt` and `test-inventory-after.txt`; 79 collected nodes.
+- Current explicit inventory: `artifacts/verification/test-inventory-current.txt` and `test-inventory-after.txt`; 74 collected nodes after duplicate consolidation.
 - Current collection command: `uv run pytest --collect-only`; exit 0.
 
-The apparent 47→34 decrease was a net count, not deletion of 13 valid tests. The 47 baseline consisted of 24 configured unit tests plus 23 root-level scripts discovered accidentally by recursive fallback. The intermediate 34 consisted of the 24 configured tests plus 10 new safety/migration tests. The 23 root nodes were relocated afterward, and additional safety tests were added; current explicit collection is 79.
+The apparent 47→34 decrease was a net count, not deletion of 13 valid tests. The 47 baseline consisted of 24 configured unit tests plus 23 root-level scripts discovered accidentally by recursive fallback. The intermediate 34 consisted of the 24 configured tests plus 10 new safety/migration tests. The 23 root nodes were relocated afterward, and additional safety tests were added. Current explicit collection is 74 after deliberately removing the five-node duplicate module described below.
 
 ## Every intermediate missing node
 
@@ -31,10 +31,10 @@ The apparent 47→34 decrease was a net count, not deletion of 13 valid tests. T
 | `test_wf.py::test_get_test_period` | Same | `.../test_walk_forward_periods.py::test_get_test_period` |
 | `test_wf.py::test_hypothesis` | Same | `.../test_walk_forward_periods.py::test_hypothesis` |
 | `test_wf.py::test_dataset_hash` | Same | `.../test_walk_forward_periods.py::test_dataset_hash` |
-| `test_wf2.py::test_period_split_creation` | Duplicate root script excluded | `trading-platform/tests/integration/test_walk_forward_periods_retried.py::test_period_split_creation` |
-| `test_wf2.py::test_walk_forward_folds` | Same duplicate | `.../test_walk_forward_periods_retried.py::test_walk_forward_folds` |
-| `test_wf2.py::test_get_test_period` | Same duplicate | `.../test_walk_forward_periods_retried.py::test_get_test_period` |
-| `test_wf2.py::test_hypothesis` | Same duplicate | `.../test_walk_forward_periods_retried.py::test_hypothesis` |
-| `test_wf2.py::test_dataset_hash` | Same duplicate | `.../test_walk_forward_periods_retried.py::test_dataset_hash` |
+| `test_wf2.py::test_period_split_creation` | Duplicate of canonical walk-forward test; intentionally removed during consolidation | `trading-platform/tests/integration/test_walk_forward_periods.py::test_period_split_creation` |
+| `test_wf2.py::test_walk_forward_folds` | Same duplicate; intentionally removed | `.../test_walk_forward_periods.py::test_walk_forward_folds` |
+| `test_wf2.py::test_get_test_period` | Same duplicate; intentionally removed | `.../test_walk_forward_periods.py::test_get_test_period` |
+| `test_wf2.py::test_hypothesis` | Same duplicate; intentionally removed | `.../test_walk_forward_periods.py::test_hypothesis` |
+| `test_wf2.py::test_dataset_hash` | Same duplicate; intentionally removed | `.../test_walk_forward_periods.py::test_dataset_hash` |
 
-No valid baseline node remains missing from the current explicit inventory. The two walk-forward files are preserved as separate nodes because the baseline had both; they should be merged in a future cleanup only with an explicit node-removal decision.
+The five `test_wf2.py` nodes are the only intentional removals. They duplicated the canonical module's test logic; the canonical five tests remain collected and passing. No non-duplicate baseline behavior was removed.

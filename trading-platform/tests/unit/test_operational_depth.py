@@ -545,6 +545,22 @@ def test_deterministic_ml_pipeline_is_point_in_time_and_registered() -> None:
     with pytest.raises(ModelInputRejected):
         MLTrainingPipeline().train("bad", list(reversed(examples)), "code", criteria)
     with pytest.raises(ModelInputRejected):
+        MLTrainingPipeline().train(
+            "duplicate-time",
+            examples[:5]
+            + [
+                TrainingExample(
+                    examples[4].timestamp,
+                    examples[4].available_at,
+                    {"momentum": 6.0, "volatility": 1.0},
+                    0.6,
+                )
+            ]
+            + examples[6:],
+            "code",
+            criteria,
+        )
+    with pytest.raises(ModelInputRejected):
         TrainingExample(examples[0].timestamp, examples[0].timestamp + timedelta(seconds=1), {"x": 1.0}, 0.1)
 
 

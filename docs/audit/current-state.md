@@ -1,9 +1,9 @@
 # Current State Audit
 
-**Audit timestamp:** 2026-09-16T00:39:22Z baseline; implementation audit continues on the current branch.
+**Audit timestamp:** 2026-09-16T00:39:22Z baseline; final verification recorded after implementation.
 **Starting branch:** `fix/verified-platform-foundation`
 **Starting commit:** `9b461b5`
-**Remote feature head:** `ced5760`; **main:** `323a701`
+**Final remote feature head:** `1f32cb9`; **main baseline:** `323a701`
 
 ## Baseline Evidence
 
@@ -20,14 +20,23 @@
 
 Environment: Windows, Python 3.12.10, uv 0.10.9. All baseline commands used the local virtual environment. No broker, database, or paid data service was contacted.
 
+## Final Verification
+
+The final explicit collection command reports 74 nodes after consolidating the
+five duplicate `test_wf2.py` nodes. With isolated PostgreSQL configured, the
+final suite reports 74 passed, 85% overall coverage, and 90% aggregate coverage
+for OMS/risk/reconciliation/authorization. Ruff, formatting, strict mypy,
+recursive imports, dependency audit, local secret scan, and GitHub Actions pass.
+Evidence is under `artifacts/verification/`.
+
 ## Structure and Findings
 
-Production code is under `trading-platform/src/trading_platform`. Existing meaningful modules cover domain models, daily-bar ingestion, a simulator, a moving-average strategy, basic OMS/risk, experiment/baseline persistence, broker/chaos/monitor sketches, and walk-forward/ML sketches. `cli`, `execution`, `features`, `observability`, and `reconciliation` were empty package directories. Migrations and runtime config directories were empty. The original phase plan exists at `AI_Trading_Platform_Phase_By_Phase_Execution_Plan.md`.
+Production code is under `trading-platform/src/trading_platform`. It now includes validated domain models, daily-bar ingestion, a no-lookahead simulator, deterministic strategy/report paths, OMS/risk/reconciliation, async PostgreSQL persistence, fake/shadow/paper broker boundaries, monitoring/alerts/dead-man checks, deterministic ML Stage A, and strict AI feature validation. The original phase plan exists at `AI_Trading_Platform_Phase_By_Phase_Execution_Plan.md`.
 
-The original pytest configuration targeted a nonexistent root `tests` directory, so root-level `phase*_test.py` and scratch scripts were collected by fallback. Several are demonstrations rather than meaningful tests. The prior CI workflow was unpushed and did not use locked uv installation, PostgreSQL, required artifacts, or secret scanning.
+The original pytest configuration targeted a nonexistent root `tests` directory, so root-level `phase*_test.py` and scratch scripts were collected by fallback. Legitimate tests were relocated under the configured root; duplicate walk-forward tests were consolidated. The CI workflow now uses locked uv installation, PostgreSQL, coverage thresholds, artifacts, and Gitleaks.
 
 The working tree contained 38 modified tracked files and numerous untracked debugging scripts and tool-output files. These changes were not authored by this audit and are preserved pending review; no destructive git cleanup was used.
 
 ## Coding Status Ceiling
 
-No paper or live broker connection, shadow operation, 60-day validation, or AI promotion is claimed. The final evidence bundle must distinguish local/CI proof from external and forward-evidence gates.
+No paper or live broker connection, shadow operation, 60-day validation, or AI promotion is claimed. The evidence bundle distinguishes local/CI proof from external and forward-evidence gates. The worktree still contains pre-existing scratch files preserved for human review.

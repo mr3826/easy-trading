@@ -1,7 +1,7 @@
 # Worktree Ownership Classification
 
 **Recorded:** 2026-09-16, continuation session.
-**Backup patches:** `C:\Users\ahmee\AppData\Local\Temp\kilo\easy-trading-p0-full-diff-current.patch` and `easy-trading-p0-full-diff.patch` (full binary-capable diffs; SHA-256 recorded in the execution log). Inventory records remain in `artifacts/verification/p0-git-status.txt`, `p0-diff-names.txt`, `p0-diff-stat.txt`, and `p0-untracked.txt`.
+**Backup patches:** Two binary-safe full-diff backups were preserved in a private, operator-controlled location outside this repository. The exact temporary path is intentionally not recorded in public documentation. Inventory records remain in `artifacts/verification/p0-git-status.txt`, `p0-diff-names.txt`, `p0-diff-stat.txt`, and `p0-untracked.txt`.
 
 ## Classification basis
 
