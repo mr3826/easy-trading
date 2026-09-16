@@ -52,11 +52,11 @@ target-version = ["py312"]
 [tool.ruff]
 line-length = 120
 target-version = "py312"
+exclude = ["debug_*.py", "fix_*.py", "analyze_*.py", "show_*.py", "count_errors.py", "temp_check.py", "phase*_test.py", "test_phase*.py", "test_wf*.py", "phase*_demo.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
 per-file-ignores = { "trading-platform/tests/**/*.py" = ["S101"], "*_test.py" = ["S101"] }
-exclude = ["debug_*.py", "fix_*.py", "analyze_*.py", "show_*.py", "count_errors.py", "temp_check.py", "phase*_test.py", "test_phase*.py", "test_wf*.py", "phase*_demo.py"]
 
 [tool.mypy]
 python_version = "3.12"
