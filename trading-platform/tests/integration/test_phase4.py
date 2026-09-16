@@ -1,4 +1,5 @@
 """Phase 4 tests for the AI Trading Platform."""
+
 from trading_platform.strategies.ma_cross_strategy import (
     MaCrossHypothesis,
     generate_signal,
@@ -25,8 +26,11 @@ from trading_platform.persistence.baseline_report import (
 def test_hypothesis():
     """Test MaCrossHypothesis creation and serialization."""
     h = MaCrossHypothesis(
-        fast_length=5, slow_length=20, max_positions=3,
-        commission_per_order=1.0, slippage_pct=0.001
+        fast_length=5,
+        slow_length=20,
+        max_positions=3,
+        commission_per_order=1.0,
+        slippage_pct=0.001,
     )
     assert h.fast_length == 5
     assert h.slow_length == 20

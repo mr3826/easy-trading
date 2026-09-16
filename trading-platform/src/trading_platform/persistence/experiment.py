@@ -16,18 +16,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from trading_platform.strategies.ma_cross_strategy import (
     MaCrossHypothesis,
-    hypothesis_to_dict,
     dict_to_hypothesis,
+    hypothesis_to_dict,
 )
-
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -75,7 +73,7 @@ class ExperimentRecord:
         self.seed = seed
         self.result_metrics = result_metrics or {}
         self.notes = notes
-        self.created_at = datetime.utcnow()
+        self.created_at = datetime.now(timezone.utc)
         self._path: Optional[Path] = None
 
     # -----------------------------------------------------------------
@@ -116,7 +114,7 @@ class ExperimentRecord:
         # Try exact match first
         record_path = root / experiment_id / "experiment.json"
         if record_path.exists():
-            return _from_dict(record_path.read_text())
+            return ExperimentRecord._from_dict(json.loads(record_path.read_text()))
         # Try versioned match
         if "_" in experiment_id:
             base_id = experiment_id.rsplit("_v", 1)[0]
@@ -124,7 +122,7 @@ class ExperimentRecord:
                 if entry.is_dir() and entry.name.startswith(base_id):
                     p = entry / "experiment.json"
                     if p.exists():
-                        return _from_dict(p.read_text())
+                        return ExperimentRecord._from_dict(json.loads(p.read_text()))
         return None
 
     # -----------------------------------------------------------------
@@ -220,7 +218,7 @@ class ExperimentRegistry:
                 json_path = entry / "experiment.json"
                 if json_path.exists():
                     try:
-                        record = ExperimentRecord._from_dict(json_path.read_text())
+                        record = ExperimentRecord._from_dict(json.loads(json_path.read_text()))
                         self._records[record.experiment_id] = record
                     except Exception:
                         # Skip malformed records
@@ -252,6 +250,7 @@ class ExperimentRegistry:
             exp_dir = self.root / experiment_id
             if exp_dir.exists():
                 import shutil
+
                 shutil.rmtree(exp_dir)
             return True
         return False

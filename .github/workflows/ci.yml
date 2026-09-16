@@ -18,6 +18,10 @@ jobs:
         options: >-
           --health-cmd="pg_isready -U postgres -d trading_platform_test"
           --health-interval=5s --health-timeout=5s --health-retries=10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/trading_platform_test
+      LIVE_TRADING_ENABLED: "false"
+      LIVE_STATUS: NOT_AUTHORIZED
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -36,11 +40,19 @@ jobs:
         run: uv run ruff format --check .
       - name: Mypy
         run: uv run mypy trading-platform/src
+      - name: Prepare artifacts
+        run: mkdir -p artifacts/verification
       - name: Tests and coverage
         run: >-
           uv run pytest -m "not external" --cov=trading_platform
-          --cov-report=term-missing --cov-report=xml
+          --cov-report=term-missing --cov-report=xml:artifacts/verification/coverage.xml
+          --cov-fail-under=80
           --junitxml=artifacts/verification/test-results.xml
+      - name: Critical coverage
+        run: >-
+          uv run coverage report
+          --include='*/trading_platform/oms/*.py,*/trading_platform/risk/*.py,*/trading_platform/reconciliation/*.py,*/trading_platform/authorization.py'
+          --fail-under=90
       - name: Dependency audit
         run: uv run pip-audit
       - name: Secret scan

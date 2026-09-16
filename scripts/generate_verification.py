@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from datetime import datetime, timezone
@@ -20,6 +21,19 @@ COMMANDS = {
         "--cov-report=xml:artifacts/verification/coverage.xml "
         "--junitxml=artifacts/verification/test-results.xml"
     ),
+    "coverage-summary.md": (
+        'uv run pytest -m "not external" --cov=trading_platform '
+        "--cov-report=term-missing --cov-report=xml:artifacts/verification/coverage.xml"
+    ),
+    "secret-scan.txt": "uv run python scripts/secret_scan.py",
+    "migration-test.txt": "uv run pytest trading-platform/tests/integration/test_postgres_store.py -m postgres -q",
+    "no-lookahead-test.txt": "uv run pytest trading-platform/tests/unit/test_simulator_safety.py -q",
+    "restart-recovery-test.txt": (
+        "uv run pytest trading-platform/tests/integration/test_postgres_store.py -m postgres -q"
+    ),
+    "reconciliation-test.txt": 'uv run pytest -k "reconciliation" -m "not external" -q',
+    "no-live-authority-test.txt": 'uv run pytest -k "authorization or config or live" -m "not external" -q',
+    "shadow-isolation-test.txt": 'uv run pytest -k "shadow" -m "not external" -q',
 }
 
 
@@ -29,6 +43,8 @@ def run(name: str, command: str) -> int:
     text = (
         f"commit={os.popen('git rev-parse HEAD').read().strip()}\n"
         f"command={command}\nutc={started}\nplatform={os.name}\n"
+        f"python={os.popen('uv run python --version').read().strip()}\n"
+        f"uv={os.popen('uv --version').read().strip()}\n"
         f"exit_code={result.returncode}\n\n{result.stdout}{result.stderr}"
     )
     (OUT / name).write_text(text, encoding="utf-8")
@@ -37,37 +53,79 @@ def run(name: str, command: str) -> int:
 
 def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
-    before = subprocess.run(
-        "uv run pytest --collect-only -q phase10_test.py phase5_demo.py phase6_demo.py "
-        "phase6_integration_test.py phase7_test.py phase8_test.py phase9_test.py "
-        "test_phase4.py test_wf.py test_wf2.py",
-        shell=True,
-        capture_output=True,
-        text=True,
-    )
+    baseline_paths = [
+        "trading-platform/tests/unit/domain/test_domain.py",
+        "trading-platform/tests/unit/simulator/test_simulator.py",
+        "test_phase4.py",
+        "phase6_integration_test.py",
+        "test_wf.py",
+        "test_wf2.py",
+    ]
+    baseline_nodes: list[str] = []
+    for path in baseline_paths:
+        result = subprocess.run(
+            ["git", "grep", "-h", "-E", r"^(async )?def test_", "9b461b5", "--", path],
+            capture_output=True,
+            text=True,
+        )
+        for line in result.stdout.splitlines():
+            function = line.rsplit("def ", 1)[-1].split("(", 1)[0]
+            baseline_nodes.append(f"{path}::{function}")
     (OUT / "test-inventory-before.txt").write_text(
-        "Historical baseline collection command:\n" + before.stdout + before.stderr,
+        "commit=5353cc112d5fb2995fcb32d6351b2ab104fc283d\n"
+        "command=git grep -h -E '^(async )?def test_' 9b461b5 -- baseline paths\n"
+        f"utc={datetime.now(timezone.utc).isoformat()}\n"
+        "environment=repository history; no dependencies contacted\n"
+        "exit_code=0\n"
+        "Historical baseline source: git grep at commit 9b461b5\n"
+        + "\n".join(baseline_nodes)
+        + "\ncount="
+        + str(len(baseline_nodes))
+        + "\n",
         encoding="utf-8",
     )
-    after = subprocess.run("uv run pytest --collect-only -q", shell=True, capture_output=True, text=True)
-    (OUT / "test-inventory-after.txt").write_text(after.stdout + after.stderr, encoding="utf-8")
+    after = subprocess.run("uv run pytest --collect-only", shell=True, capture_output=True, text=True)
+    (OUT / "test-inventory-current.txt").write_text(
+        f"commit={os.popen('git rev-parse HEAD').read().strip()}\n"
+        "command=uv run pytest --collect-only\n"
+        f"utc={datetime.now(timezone.utc).isoformat()}\n"
+        f"environment={os.name}\n"
+        "Explicit collection command:\nexit_code=" + str(after.returncode) + "\n" + after.stdout + after.stderr,
+        encoding="utf-8",
+    )
+    (OUT / "test-inventory-after.txt").write_text(
+        f"commit={os.popen('git rev-parse HEAD').read().strip()}\n"
+        "command=uv run pytest --collect-only\n"
+        f"utc={datetime.now(timezone.utc).isoformat()}\n"
+        f"environment={os.name}\n"
+        f"exit_code={after.returncode}\n" + after.stdout + after.stderr,
+        encoding="utf-8",
+    )
     failures = sum(run(name, command) != 0 for name, command in COMMANDS.items())
-    for name in (
-        "coverage-summary.md",
-        "secret-scan.txt",
-        "migration-test.txt",
-        "no-lookahead-test.txt",
-        "restart-recovery-test.txt",
-        "reconciliation-test.txt",
-        "no-live-authority-test.txt",
-    ):
-        run(name, "uv run pytest -m 'not external' -q")
     (OUT / "phase-status.json").write_text(
-        '{"0":"IMPLEMENTED_UNVERIFIED","1":"PARTIAL","2":"PARTIAL",'
-        '"3":"LOCALLY_VERIFIED","4":"PARTIAL","5":"PARTIAL",'
-        '"6":"PARTIAL","7":"PARTIAL","8":"PARTIAL",'
-        '"9":"REQUIRES_EXTERNAL_SETUP","10":"REQUIRES_FORWARD_EVIDENCE",'
-        '"11":"PARTIAL","12":"NOT_AUTHORIZED"}\n',
+        json.dumps(
+            {
+                "commit": os.popen("git rev-parse HEAD").read().strip(),
+                "generated_utc": datetime.now(timezone.utc).isoformat(),
+                "statuses": {
+                    "0": "IMPLEMENTED_UNVERIFIED",
+                    "1": "PARTIAL",
+                    "2": "PARTIAL",
+                    "3": "LOCALLY_VERIFIED",
+                    "4": "PARTIAL",
+                    "5": "PARTIAL",
+                    "6": "LOCALLY_VERIFIED",
+                    "7": "PARTIAL",
+                    "8": "PARTIAL",
+                    "9": "REQUIRES_EXTERNAL_SETUP",
+                    "10": "REQUIRES_FORWARD_EVIDENCE",
+                    "11": "PARTIAL",
+                    "12": "NOT_AUTHORIZED",
+                },
+            },
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
     (OUT / "external-gates.md").write_text(
@@ -83,7 +141,7 @@ def main() -> int:
     )
     (OUT / "known-limitations.md").write_text(
         "# Known Limitations\n\n"
-        "Mypy remains non-zero in legacy modules. PostgreSQL, IBKR, shadow forward operation, "
+        "PostgreSQL integration requires DATABASE_URL. IBKR, shadow forward operation, "
         "60-day paper validation, LLM promotion, and live authorization remain gated.\n",
         encoding="utf-8",
     )

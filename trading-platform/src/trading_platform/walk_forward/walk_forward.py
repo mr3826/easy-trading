@@ -8,25 +8,22 @@ V1 daily long-only hypothesis: MA crossover with provisional parameters.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from collections.abc import Mapping
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
-from trading_platform.domain import Instrument
+from trading_platform.domain import Bar, Instrument, OrderSide, OrderType, Signal, TimeInForce
+from trading_platform.persistence.experiment import (
+    ExperimentRegistry,
+)
 from trading_platform.simulator.event_driven_simulator import (
     EventDrivenSimulator,
-    SimulationMode,
-    FillAssumption,
+    SimulationResult,
 )
 from trading_platform.strategies.ma_cross_strategy import (
     MaCrossHypothesis,
     generate_signal,
-    hypothesis_to_dict,
 )
-from trading_platform.persistence.experiment import (
-    ExperimentRecord,
-    ExperimentRegistry,
-)
-
 
 # ---------------------------------------------------------------------------
 # Period split — strictly chronological, no randomisation
@@ -53,9 +50,7 @@ class PeriodSplit:
     ):
         # Validation of sizes
         assert train_days >= min_train, f"train_days={train_days} < min={min_train}"
-        assert validation_days >= min_validation, (
-            f"validation_days={validation_days} < min={min_validation}"
-        )
+        assert validation_days >= min_validation, f"validation_days={validation_days} < min={min_validation}"
         assert test_days >= min_test, f"test_days={test_days} < min={min_test}"
 
         self.train_days = train_days
@@ -87,9 +82,7 @@ class PeriodSplit:
             val_end = end - timedelta(days=test_days - 1)
             test_end = end
             # Recalculate validation
-            train_end = test_end - timedelta(
-                days=self.validation_days + test_days - 1
-            )
+            train_end = test_end - timedelta(days=self.validation_days + test_days - 1)
             if (train_end - start).days + 1 < self.min_train:
                 raise ValueError("Data too short for requested split sizes")
 
@@ -182,7 +175,7 @@ class WalkForwardEvaluator:
         self.hypothesis = hypothesis
         self.period_split = period_split
         self.registry = registry
-        self.fold_results: List[Dict[str, any]] = []
+        self.fold_results: List[Dict[str, Any]] = []
 
     # -----------------------------------------------------------------
     # Run one fold
@@ -191,9 +184,9 @@ class WalkForwardEvaluator:
         self,
         fold_index: int,
         fold: Dict[str, Tuple[date, date]],
-        bars_by_symbol: Dict[str, Dict[str, list]],  # symbol -> date -> [Bar]
+        bars_by_symbol: Dict[str, Dict[str, List[Any]]],  # symbol -> date -> [Bar]
         symbols: List[str],
-    ) -> Dict[str, any]:
+    ) -> Dict[str, Any]:
         """Run one walk-forward fold.
 
         V1 workflow:
@@ -201,9 +194,7 @@ class WalkForwardEvaluator:
         - Validate: simulate on validation period, monitor metrics
         - Test: simulate on test period, record locked results
         """
-        import datetime
 
-        label = f"fold_{fold_index}"
         train_start, train_end = fold["train"]
         val_start, val_end = fold["validation"]
         test_start, test_end = fold["test"]
@@ -213,17 +204,17 @@ class WalkForwardEvaluator:
         # and remains fixed across all folds. We just run the simulator.
 
         # Build simulated bars for training period
-        train_bars: Dict[str, list] = {}
+        train_bars: Dict[str, Dict[date, List[Any]]] = {}
         for sym in symbols:
             train_bars[sym] = self._extract_bars(bars_by_symbol.get(sym, {}), train_start, train_end)
 
         # Build simulated bars for validation period
-        val_bars: Dict[str, list] = {}
+        val_bars: Dict[str, Dict[date, List[Any]]] = {}
         for sym in symbols:
             val_bars[sym] = self._extract_bars(bars_by_symbol.get(sym, {}), val_start, val_end)
 
         # Build simulated bars for test period
-        test_bars: Dict[str, list] = {}
+        test_bars: Dict[str, Dict[date, List[Any]]] = {}
         for sym in symbols:
             test_bars[sym] = self._extract_bars(bars_by_symbol.get(sym, {}), test_start, test_end)
 
@@ -235,19 +226,17 @@ class WalkForwardEvaluator:
                 train_signals = []
                 for bar_date, bar_list in sorted(train_bars[sym].items()):
                     sig = generate_signal(
-                        {sym: train_bars[sym]},
+                        {sym: [bar for bars in train_bars[sym].values() for bar in bars]},
                         self.hypothesis,
                         sym,
-                        bar_date.date(),
+                        bar_date,
                     )
                     if sig:
                         train_signals.append(sig)
                         train_signal_map[sym] = train_signals
 
         # Run simulator on train period
-        train_result = self._run_simulator_for_period(
-            self.simulator, train_bars, train_signal_map
-        )
+        train_result = self._run_simulator_for_period(self.simulator, train_bars, train_signal_map)
 
         # ---- Validation phase ----
         val_signal_map = {}
@@ -256,18 +245,16 @@ class WalkForwardEvaluator:
                 val_signals = []
                 for bar_date, bar_list in sorted(val_bars[sym].items()):
                     sig = generate_signal(
-                        {sym: val_bars[sym]},
+                        {sym: [bar for bars in val_bars[sym].values() for bar in bars]},
                         self.hypothesis,
                         sym,
-                        bar_date.date(),
+                        bar_date,
                     )
                     if sig:
                         val_signals.append(sig)
                         val_signal_map[sym] = val_signals
 
-        val_result = self._run_simulator_for_period(
-            self.simulator, val_bars, val_signal_map
-        )
+        val_result = self._run_simulator_for_period(self.simulator, val_bars, val_signal_map)
 
         # ---- Test phase (LOCKED - no parameter tuning) ----
         test_signal_map = {}
@@ -276,18 +263,16 @@ class WalkForwardEvaluator:
                 test_signals = []
                 for bar_date, bar_list in sorted(test_bars[sym].items()):
                     sig = generate_signal(
-                        {sym: test_bars[sym]},
+                        {sym: [bar for bars in test_bars[sym].values() for bar in bars]},
                         self.hypothesis,
                         sym,
-                        bar_date.date(),
+                        bar_date,
                     )
                     if sig:
                         test_signals.append(sig)
                         test_signal_map[sym] = test_signals
 
-        test_result = self._run_simulator_for_period(
-            self.simulator, test_bars, test_signal_map
-        )
+        test_result = self._run_simulator_for_period(self.simulator, test_bars, test_signal_map)
 
         # ---- Compile fold results ----
         fold_result = {
@@ -326,44 +311,79 @@ class WalkForwardEvaluator:
 
     def _extract_bars(
         self,
-        bars_dict: Dict,
-        start: datetime,
-        end: datetime,
-    ) -> Dict[date, list]:
+        bars_dict: Mapping[str, List[Any]],
+        start: date,
+        end: date,
+    ) -> Dict[date, List[Any]]:
         """Extract bars within a date range, grouped by date."""
-        result: Dict[date, list] = {}
+        result: Dict[date, List[Any]] = {}
         if not bars_dict:
             return result
         for bar_date_str, bar_list in bars_dict.items():
-            bar_date = datetime.datetime.fromisoformat(bar_date_str).date()
-            if start.date() <= bar_date <= end.date():
+            bar_date = datetime.fromisoformat(bar_date_str).date()
+            if start <= bar_date <= end:
                 result[bar_date] = bar_list
         return result
 
     def _run_simulator_for_period(
         self,
         simulator: EventDrivenSimulator,
-        bars: Dict[str, list],
-        signal_map: Dict[str, list],
-    ) -> any:
+        bars: Dict[str, Dict[date, List[Any]]],
+        signal_map: Dict[str, List[Dict[str, Any]]],
+    ) -> SimulationResult:
         """Run simulator on a given period with generated signals."""
         # Build signals list ordered by date
-        all_signals = []
+        all_signals: List[Signal] = []
         for sym in sorted(signal_map.keys()):
-            for sig in signal_map[sym]:
-                all_signals.append(sig)
+            for raw_signal in signal_map[sym]:
+                instrument = Instrument(sym)
+                all_signals.append(
+                    Signal(
+                        instrument=instrument,
+                        side=OrderSide[raw_signal["side"]],
+                        quantity=int(raw_signal["quantity"]),
+                        price=raw_signal.get("price"),
+                        order_type=OrderType[raw_signal["order_type"]],
+                        time_in_force=TimeInForce[raw_signal["time_in_force"]],
+                    )
+                )
 
-        # Sort signals by timestamp
-        all_signals.sort(key=lambda s: s.timestamp)
+        simulation_bars: List[Bar] = []
+        for symbol, bars_by_date in bars.items():
+            instrument = Instrument(symbol)
+            for bar_date, raw_bars in bars_by_date.items():
+                for raw_bar in raw_bars:
+                    if isinstance(raw_bar, Bar):
+                        simulation_bars.append(raw_bar)
+                        continue
+                    if not isinstance(raw_bar, Mapping):
+                        raise TypeError("walk-forward bars must be Bar or mapping values")
+                    timestamp_value = raw_bar["timestamp"]
+                    timestamp = (
+                        datetime.fromisoformat(timestamp_value) if isinstance(timestamp_value, str) else timestamp_value
+                    )
+                    if timestamp.tzinfo is None:
+                        timestamp = timestamp.replace(tzinfo=timezone.utc)
+                    simulation_bars.append(
+                        Bar(
+                            instrument=instrument,
+                            timestamp=timestamp,
+                            open=float(raw_bar["open"]),
+                            high=float(raw_bar["high"]),
+                            low=float(raw_bar["low"]),
+                            close=float(raw_bar["close"]),
+                            volume=int(raw_bar["volume"]),
+                        )
+                    )
 
         # Run simulation
         result = simulator.run(
-            bars=bars,
+            bars=simulation_bars,
             signals=all_signals,
         )
         return result
 
-    def _check_determinism(self, result: any) -> bool:
+    def _check_determinism(self, result: SimulationResult) -> bool:
         """Check if a simulation result is deterministic."""
         # In V1 with fixed seed and fixed inputs, should always be deterministic
         # This is verified by the existing test_simulator_deterministic_replay
@@ -372,7 +392,7 @@ class WalkForwardEvaluator:
     # -------------------------------------------------------------------------
     # Aggregate across folds
 
-    def aggregate_results(self) -> Dict[str, any]:
+    def aggregate_results(self) -> Dict[str, Any]:
         """Aggregate walk-forward results with multiple-testing awareness."""
         if not self.fold_results:
             return {"error": "No fold results recorded"}
@@ -382,16 +402,13 @@ class WalkForwardEvaluator:
         # Test-period metrics across folds
         test_final_cash = [r["test_final_cash"] for r in self.fold_results]
         test_total_pnl = [r["test_total_pnl"] for r in self.fold_results]
-        test_trade_count = [r["test_trade_count"] for r in self.fold_results]
         test_commission = [r["test_total_commission"] for r in self.fold_results]
         test_slippage = [r["test_total_slippage"] for r in self.fold_results]
 
         # Validation metrics (should be close to train if hypothesis is stable)
-        val_final_cash = [r["val_final_cash"] for r in self.fold_results]
         val_total_pnl = [r["val_total_pnl"] for r in self.fold_results]
 
         # Train metrics
-        train_final_cash = [r["train_final_cash"] for r in self.fold_results]
         train_total_pnl = [r["train_total_pnl"] for r in self.fold_results]
 
         # Consistency checks
@@ -429,9 +446,7 @@ class WalkForwardEvaluator:
     # -------------------------------------------------------------------------
     # Bootstrap drawdown distribution
 
-    def bootstrap_drawdown_distribution(
-        self, n_resamples: int = 1000, seed: int = 42
-    ) -> Dict[str, any]:
+    def bootstrap_drawdown_distribution(self, n_resamples: int = 1000, seed: int = 42) -> Dict[str, Any]:
         """Estimate drawdown distribution via bootstrap resampling of trade sequences.
 
         V1: simple implementation that resamples PnL from test periods across folds.
@@ -448,19 +463,19 @@ class WalkForwardEvaluator:
         for _ in range(n_resamples):
             # Resample with replacement from across folds
             resample_pnls = [random.choice(all_test_pnls) for _ in range(len(all_test_pnls))]
-            resample_commissions = [
-                random.choice(all_test_commissions) for _ in range(len(all_test_pnls))
-            ]
-            resample_slippages = [
-                random.choice(all_test_slippages) for _ in range(len(all_test_slippages))
-            ]
+            resample_commissions = [random.choice(all_test_commissions) for _ in range(len(all_test_pnls))]
+            resample_slippages = [random.choice(all_test_slippages) for _ in range(len(all_test_slippages))]
 
             # Drawdown = (start - end) / start, adjusted for costs
             # Assuming start = average across folds
             start_val = sum(all_test_pnls) / len(all_test_pnls) if all_test_pnls else 1.0
             end_val = sum(resample_pnls) / len(resample_pnls) if resample_pnls else 1.0
             raw_dd = (start_val - end_val) / max(start_val, 1e-10)
-            cost_adj = sum(resample_commissions) + sum(resample_slippages) / len(resample_slippages) if resample_slippages else 0
+            cost_adj = (
+                sum(resample_commissions) + sum(resample_slippages) / len(resample_slippages)
+                if resample_slippages
+                else 0
+            )
             adj_dd = raw_dd + cost_adj / max(start_val, 1e-10)
 
             drawdowns.append(adj_dd)

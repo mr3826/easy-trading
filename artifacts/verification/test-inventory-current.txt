@@ -1,7 +1,8 @@
 commit=5353cc112d5fb2995fcb32d6351b2ab104fc283d
 command=uv run pytest --collect-only
-utc=2026-09-16T17:15:13.412804+00:00
+utc=2026-09-16T17:15:13.249131+00:00
 environment=nt
+Explicit collection command:
 exit_code=0
 trading-platform/tests/integration/test_phase4.py::test_hypothesis
 trading-platform/tests/integration/test_phase4.py::test_position_limit

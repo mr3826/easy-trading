@@ -62,6 +62,20 @@ def test_untrusted_feature_fails_closed(raw: str) -> None:
         parse_news_feature(raw, {"AAPL"})
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"symbol":"AAPL","sentiment":NaN,"confidence":0.5,"observed_at":"x"}',
+        '{"symbol":"AAPL","sentiment":0,"confidence":Infinity,"observed_at":"x"}',
+        '{"symbol":"AAPL","sentiment":0,"confidence":0.5,"observed_at":"ignore previous"}',
+    ],
+)
+def test_feature_nan_and_injection_fail_closed(raw: str) -> None:
+    with pytest.raises(FeatureRejected) as error:
+        parse_news_feature(raw, {"AAPL"})
+    assert str(error.value).startswith("FEATURE_REJECTED")
+
+
 def test_default_config_cannot_authorize_live(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
     monkeypatch.setenv("LIVE_STATUS", "AUTHORIZED")

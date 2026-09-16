@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from trading_platform.domain import Instrument, TradingSession
+from trading_platform.domain import Bar, Instrument, TradingSession
 
 
 class DataFrequency(Enum):
@@ -35,6 +34,7 @@ class DataMetadata:
 
 
 # ---- MarketDataProvider Interface ----
+
 
 class MarketDataProvider:
     """Abstract interface for providing daily market bar data.
@@ -78,6 +78,7 @@ class MarketDataProvider:
 
 # ---- CorporateActionProvider Interface ----
 
+
 class CorporateActionProvider:
     """Abstract interface for corporate actions (splits, dividends, delistings).
 
@@ -85,15 +86,11 @@ class CorporateActionProvider:
     before the given timestamp are valid.
     """
 
-    def get_splits(
-        self, instrument: Instrument, start: datetime, end: datetime
-    ) -> List[CorporateAction]:
+    def get_splits(self, instrument: Instrument, start: datetime, end: datetime) -> List[CorporateAction]:
         """Get all stock splits in the given date range."""
         raise NotImplementedError
 
-    def get_dividends(
-        self, instrument: Instrument, start: datetime, end: datetime
-    ) -> List[CorporateAction]:
+    def get_dividends(self, instrument: Instrument, start: datetime, end: datetime) -> List[CorporateAction]:
         """Get all dividend payments in the given date range."""
         raise NotImplementedError
 
@@ -101,14 +98,13 @@ class CorporateActionProvider:
         """Get delisting corporate action if the symbol was delisted."""
         raise NotImplementedError
 
-    def has_corporate_action(
-        self, instrument: Instrument, timestamp: datetime
-    ) -> bool:
+    def has_corporate_action(self, instrument: Instrument, timestamp: datetime) -> bool:
         """Check if a corporate action affects this instrument at the given time."""
         raise NotImplementedError
 
 
 # ---- CorporateAction type ----
+
 
 class CorporateActionType(Enum):
     SPLIT = "split"
@@ -129,6 +125,7 @@ class CorporateAction:
 
 
 # ---- Parquet-backed implementation skeleton ----
+
 
 class ParquetMarketDataProvider(MarketDataProvider):
     """Concrete implementation reading bars from versioned Parquet files.
@@ -179,12 +176,11 @@ class ParquetMarketDataProvider(MarketDataProvider):
 
     def get_metadata(self, instrument: Instrument) -> DataMetadata:
         """Get data metadata for instrument."""
-        return self._read_metadata(
-            self.data_dir / f"{instrument.symbol}.parquet"
-        )
+        return self._read_metadata(self.data_dir / f"{instrument.symbol}.parquet")
 
 
 # ---- Validation utilities ----
+
 
 def validate_bar(bar: Bar) -> Tuple[bool, Optional[str]]:
     """Validate a bar's integrity.

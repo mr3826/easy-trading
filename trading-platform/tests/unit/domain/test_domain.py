@@ -5,34 +5,32 @@ These tests encode permanent invariants as specified in Phase 1 exit gate G1.
 
 from datetime import datetime, timezone
 
+import pytest
 from trading_platform.domain import (
     Bar,
+    BrokerSnapshot,
     CorporateAction,
     Instrument,
-    InstrumentType,
-    OrderStatus,
+    JournalEvent,
+    Order,
+    OrderIntent,
     OrderSide,
+    OrderStatus,
     OrderType,
     PortfolioSnapshot,
     Position,
+    ReconciliationResult,
     RiskDecision,
     Signal,
     TimeInForce,
-    TradingSession,
-    Execution,
-    Order,
-    OrderIntent,
-    BrokerSnapshot,
-    ReconciliationResult,
-    JournalEvent,
 )
 
 
 def test_invalid_nan_price_rejection():
     """NaN price must be rejected."""
     inst = Instrument(symbol="AAPL")
-    try:
-        bar = Bar(
+    with pytest.raises(ValueError):
+        _ = Bar(
             instrument=inst,
             timestamp=datetime.now(timezone.utc),
             open=float("nan"),
@@ -41,16 +39,13 @@ def test_invalid_nan_price_rejection():
             close=float("nan"),
             volume=100,
         )
-        assert False, "NaN price should have raised an error or been rejected"
-    except (ValueError, AssertionError):
-        pass  # Expected
 
 
 def test_invalid_negative_quantity_rejection():
     """Negative quantity must be rejected."""
     inst = Instrument(symbol="AAPL")
-    try:
-        signal = Signal(
+    with pytest.raises(ValueError):
+        _ = Signal(
             instrument=inst,
             side=OrderSide.BUY,
             quantity=-10,
@@ -58,16 +53,13 @@ def test_invalid_negative_quantity_rejection():
             order_type=OrderType.MARKET,
             time_in_force=TimeInForce.DAY,
         )
-        assert False, "Negative quantity should have been rejected"
-    except (ValueError, AssertionError):
-        pass  # Expected
 
 
 def test_invalid_zero_quantity_rejection():
     """Zero quantity must be rejected."""
     inst = Instrument(symbol="AAPL")
-    try:
-        signal = Signal(
+    with pytest.raises(ValueError):
+        _ = Signal(
             instrument=inst,
             side=OrderSide.BUY,
             quantity=0,
@@ -75,9 +67,6 @@ def test_invalid_zero_quantity_rejection():
             order_type=OrderType.MARKET,
             time_in_force=TimeInForce.DAY,
         )
-        assert False, "Zero quantity should have been rejected"
-    except (ValueError, AssertionError):
-        pass  # Expected
 
 
 def test_illegal_order_transition_rejection():
@@ -109,6 +98,7 @@ def test_environment_credential_mismatch_rejection():
     """paper config cannot load live credentials automatically."""
     # This is verified by CI test — paper environment must not resolve live creds
     from trading_platform.domain import Instrument
+
     inst = Instrument(symbol="AAPL")
     # The configuration contract test will enforce this
     assert inst.symbol == "AAPL"
@@ -118,7 +108,7 @@ def test_duplicate_event_idempotency():
     """Duplicate event IDs must not create duplicate economic actions."""
     inst = Instrument(symbol="AAPL")
     base_time = datetime(2026, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
-    
+
     event1 = JournalEvent(
         event_id="dup-001",
         timestamp=base_time,
@@ -130,7 +120,7 @@ def test_duplicate_event_idempotency():
         source="strategy",
         checksum="hash1",
     )
-    
+
     event2 = JournalEvent(
         event_id="dup-001",  # Same ID as event1
         timestamp=base_time,
@@ -142,7 +132,7 @@ def test_duplicate_event_idempotency():
         source="strategy",
         checksum="hash1",
     )
-    
+
     # Same event ID should produce same checksum
     assert event1.checksum == event2.checksum
     assert event1.event_id == event2.event_id
@@ -151,10 +141,10 @@ def test_duplicate_event_idempotency():
 def test_deterministic_id_time_replay():
     """Deterministic IDs and times must reproduce consistently."""
     from trading_platform.domain import JournalEvent
-    
+
     inst = Instrument(symbol="AAPL")
     base_time = datetime(2026, 6, 1, 10, 30, 0, tzinfo=timezone.utc)
-    
+
     event_a = JournalEvent(
         event_id="det-001",
         timestamp=base_time,
@@ -166,7 +156,7 @@ def test_deterministic_id_time_replay():
         source="strategy",
         checksum="abc123",
     )
-    
+
     # Same inputs should produce same event
     assert event_a.timestamp == base_time
     assert event_a.environment == "simulation"
@@ -176,7 +166,7 @@ def test_deterministic_id_time_replay():
 def test_secret_redaction():
     """Sensitive data must not be stored raw in event payloads."""
     from trading_platform.domain import JournalEvent
-    
+
     inst = Instrument(symbol="AAPL")
     event = JournalEvent(
         event_id="sec-001",
@@ -189,7 +179,7 @@ def test_secret_redaction():
         source="strategy",
         checksum="hash",
     )
-    
+
     # Verify the payload stores the secret but the test can inspect it
     assert "api_key" in event.payload
     assert event.payload["api_key"] == "sk-live-abc123"
@@ -201,7 +191,7 @@ def test_portfolio_snapshot_immutability():
     """Portfolio snapshot should enforce structure."""
     inst_a = Instrument(symbol="AAPL")
     inst_b = Instrument(symbol="MSFT")
-    
+
     pos_a = Position(
         instrument=inst_a,
         quantity=10,
@@ -218,7 +208,7 @@ def test_portfolio_snapshot_immutability():
         unrealized_pnl=0.0,
         realized_pnl=0.0,
     )
-    
+
     snapshot = PortfolioSnapshot(
         timestamp=datetime.now(timezone.utc),
         cash=10000.0,
@@ -227,7 +217,7 @@ def test_portfolio_snapshot_immutability():
         net_exposure=3000.0,
         total_pnl=0.0,
     )
-    
+
     assert len(snapshot.positions) == 2
     assert snapshot.gross_exposure == 3000.0
 
@@ -247,14 +237,14 @@ def test_risk_decision_approval():
         signal=signal,
         order_id="risk-test-1",
     )
-    
+
     risk_decision = RiskDecision(
         order_intent=order_intent,
         approved=True,
         reason="Within limits",
         position_notional=1500.0,
     )
-    
+
     assert risk_decision.approved is True
     assert risk_decision.reason == "Within limits"
     assert risk_decision.position_notional == 1500.0
@@ -281,10 +271,10 @@ def test_order_lifecycle_transitions():
             time_in_force=TimeInForce.DAY,
         ),
     )
-    
+
     # Submit → Received is a valid transition
     assert order.status == OrderStatus.SUBMITTED
-    
+
     # Cannot be FILLED immediately without processing
     assert order.status != OrderStatus.FILLED
 
@@ -344,13 +334,13 @@ def test_order_with_risk_decision():
         time_in_force=TimeInForce.DAY,
     )
     order_intent = OrderIntent(signal=signal, order_id="order-risk-1")
-    
+
     risk_decision = RiskDecision(
         order_intent=order_intent,
         approved=True,
         reason="Within limits",
     )
-    
+
     order = Order(
         order_id="order-1",
         instrument=inst,
@@ -363,7 +353,7 @@ def test_order_with_risk_decision():
         signal=signal,
         risk_decision=risk_decision,
     )
-    
+
     assert order.risk_decision is not None
     assert order.risk_decision.approved is True
 

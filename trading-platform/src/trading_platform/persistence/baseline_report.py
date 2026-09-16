@@ -1,4 +1,6 @@
-"""Engineering baseline report for Phase 4 research harness.
+"""Engineering baseline report.
+
+import json for Phase 4 research harness.
 
 Produces a fixed-symbol baseline report (system test only, NOT strategy evidence).
 
@@ -13,31 +15,23 @@ Per ADR V1 and exit gate G4/S1:
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Dict, List, Optional
+import json
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from trading_platform.domain import Instrument, Position, Bar
-from trading_platform.simulator.event_driven_simulator import (
-    EventDrivenSimulator,
-    SimulationMode,
-    FillAssumption,
-)
+from trading_platform.domain import Position
+from trading_platform.simulator.event_driven_simulator import EventDrivenSimulator, SimulationResult
 from trading_platform.strategies.ma_cross_strategy import (
     MaCrossHypothesis,
-    generate_signal,
-    hypothesis_to_dict,
 )
-
 
 # ---------------------------------------------------------------------------
 # Performance metrics
 
 
-def compute_expectancy(
-    win_trades: List[float], loss_trades: List[float]
-) -> Optional[float]:
+def compute_expectancy(win_trades: List[float], loss_trades: List[float]) -> Optional[float]:
     """Compute expectancy: expected value per trade.
 
     Expectancy = (win_rate * avg_win) - (loss_rate * avg_loss)
@@ -64,13 +58,13 @@ def compute_sharpe(returns: List[float], risk_free: float = 0.0) -> Optional[flo
     """Compute annualized Sharpe ratio (V1: simplified monthly -> annualized)."""
     if len(returns) < 2:
         return None
-    returns = np.array(returns, dtype=float)
-    excess = returns - risk_free / len(returns)  # simplified daily
+    return_array = np.array(returns, dtype=float)
+    excess = return_array - risk_free / len(return_array)  # simplified daily
     if np.std(excess) == 0:
         return None
     # Annualized: sqrt(252) for daily, sqrt(12) for monthly
     daily_sharpe = np.mean(excess) / np.std(excess)
-    annual_sharpe = daily_sharpe * (252 ** 0.5)  # assuming daily returns
+    annual_sharpe = daily_sharpe * (252**0.5)  # assuming daily returns
     return round(annual_sharpe, 4)
 
 
@@ -78,13 +72,13 @@ def compute_sortino(returns: List[float], target: float = 0.0) -> Optional[float
     """Compute annualized Sortino ratio."""
     if len(returns) < 2:
         return None
-    returns = np.array(returns, dtype=float)
-    excess = returns - target
+    return_array = np.array(returns, dtype=float)
+    excess = return_array - target
     downside = np.std(excess[excess < 0])
     if downside == 0:
         return None
     daily_sortino = np.mean(excess) / downside
-    annual_sortino = daily_sortino * (252 ** 0.5)
+    annual_sortino = daily_sortino * (252**0.5)
     return round(annual_sortino, 4)
 
 
@@ -118,7 +112,7 @@ def compute_win_loss_distribution(
 
 
 def compute_mae_mfe(
-    trades: List[dict],
+    trades: List[Dict[str, Any]],
 ) -> Dict[str, float]:
     """Compute Mean Absolute Error and Maximum Favorable Exposure.
 
@@ -150,7 +144,7 @@ def compute_mae_mfe(
 def compute_concentration(
     positions: Dict[str, Position],
     sector_map: Optional[Dict[str, str]] = None,
-) -> Dict[str, any]:
+) -> Dict[str, Any]:
     """Compute position concentration metrics.
 
     Returns: herfindahl_index, top_symbol, top_pct, sector_counts
@@ -208,14 +202,14 @@ class EngineeringBaselineReport:
         self,
         hypothesis: MaCrossHypothesis,
         simulator: EventDrivenSimulator,
-        result: any,  # SimulationResult
+        result: SimulationResult,
         sector_map: Optional[Dict[str, str]] = None,
     ):
         self.hypothesis = hypothesis
         self.simulator = simulator
         self.result = result
         self.sector_map = sector_map
-        self.timestamp = datetime.utcnow()
+        self.timestamp = datetime.now(timezone.utc)
 
     # -----------------------------------------------------------------
     # Core metrics
@@ -264,23 +258,25 @@ class EngineeringBaselineReport:
     def _get_mae_mfe(self) -> Dict[str, float]:
         return compute_mae_mfe(self._get_trade_details())
 
-    def _get_trade_details(self) -> List[dict]:
+    def _get_trade_details(self) -> List[Dict[str, Any]]:
         """Extract trade details from trade ledger for MAE/MFE calculation."""
         trades = []
         for event in self.result.trade_ledger:
             if event.event_type == "FILL":
                 detail = event.detail or {}
-                trades.append({
-                    "entry_price": detail.get("fill_price", 0.0),
-                    "exit_price": detail.get("fill_price", 0.0),  # simplified
-                    "qty": detail.get("fill_quantity", 0),
-                })
+                trades.append(
+                    {
+                        "entry_price": detail.get("fill_price", 0.0),
+                        "exit_price": detail.get("fill_price", 0.0),  # simplified
+                        "qty": detail.get("fill_quantity", 0),
+                    }
+                )
         return trades
 
     # -----------------------------------------------------------------
     # Concentration
 
-    def _get_concentration(self) -> Dict[str, any]:
+    def _get_concentration(self) -> Dict[str, Any]:
         # Positions are in the final portfolio
         positions = dict(self.result.final_positions)
         return compute_concentration(positions, self.sector_map)
@@ -288,7 +284,7 @@ class EngineeringBaselineReport:
     # -----------------------------------------------------------------
     # Generate full report
 
-    def generate(self) -> Dict[str, any]:
+    def generate(self) -> Dict[str, Any]:
         """Generate the complete engineering baseline report."""
         pnls = []
         for event in self.result.trade_ledger:
@@ -311,8 +307,6 @@ class EngineeringBaselineReport:
 
         # Compute simple returns series from portfolio state
         # (simplified: use final cash vs starting)
-        starting_cash = self._get_starting_cash()
-        final_cash = self._get_final_cash()
         total_return = self._get_total_return()
 
         # Expectancy and profit factor
@@ -364,9 +358,7 @@ class EngineeringBaselineReport:
                 "turnover": None,  # would need cumulative turnover
                 "concentration": concentration,
                 "gross_exposure_pct": None,  # would need equity base
-                "cash_reserve_pct": round(
-                    (_get_final_cash() / _get_starting_cash()) * 100, 2
-                ),
+                "cash_reserve_pct": round((self._get_final_cash() / self._get_starting_cash()) * 100, 2),
             },
             # MAE/MFE
             "mae_mfe": mae_mfe,

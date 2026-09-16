@@ -8,9 +8,9 @@ to testing/shadow/live-monitor mode.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
 import logging
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional
 
 # ---------------------------------------------------------------------------
 # Module-level logger
@@ -85,9 +85,7 @@ class SystemMonitor:
         """
         self._last_data_timestamp = timestamp
 
-    def check_data_freshness(
-        self, max_age_seconds: float = 3600.0
-    ) -> Dict[str, Any]:
+    def check_data_freshness(self, max_age_seconds: float = 3600.0) -> Dict[str, Any]:
         """Check if the last bar data is fresh enough.
 
         V1: If data is older than max_age_seconds, flag it as stale.
@@ -105,7 +103,7 @@ class SystemMonitor:
         last_ts = self._last_data_timestamp
         # Ensure both datetimes are comparable
         if last_ts is not None:
-            if last_tz := last_ts.tzinfo:
+            if last_ts.tzinfo:
                 # last_ts is timezone-aware, make now comparable
                 if now.tzinfo is None:
                     now = now.replace(tzinfo=last_ts.tzinfo)
@@ -117,10 +115,7 @@ class SystemMonitor:
         is_fresh = age_seconds <= max_age_seconds
 
         if not is_fresh:
-            logger.warning(
-                f"STALE DATA: age={age_seconds:.1f}s exceeds "
-                f"limit={max_age_seconds}s"
-            )
+            logger.warning(f"STALE DATA: age={age_seconds:.1f}s exceeds limit={max_age_seconds}s")
 
         return {
             "is_fresh": is_fresh,
@@ -177,7 +172,7 @@ class SystemMonitor:
         last_ts = self._last_write_timestamp
         # Ensure both datetimes are comparable
         if last_ts is not None:
-            if last_tz := last_ts.tzinfo:
+            if last_ts.tzinfo:
                 # last_ts is timezone-aware, make now comparable
                 if now.tzinfo is None:
                     now = now.replace(tzinfo=last_ts.tzinfo)
@@ -213,9 +208,7 @@ class SystemMonitor:
         return {
             "healthy": healthy,
             "consecutive_misses": self.heartbeat.consecutive_misses,
-            "last_seen": self.heartbeat.last_seen.isoformat()
-            if self.heartbeat.last_seen
-            else None,
+            "last_seen": self.heartbeat.last_seen.isoformat() if self.heartbeat.last_seen else None,
         }
 
     # --- Metrics snapshot ---
@@ -236,16 +229,11 @@ class SystemMonitor:
             "signals_recorded": self.signal_count,
             "risk_rejections": self.risk_rejection_count,
             "avg_decision_latency_ms": (
-                sum(self.decision_latencies) / len(self.decision_latencies)
-                if self.decision_latencies else 0.0
+                sum(self.decision_latencies) / len(self.decision_latencies) if self.decision_latencies else 0.0
             ),
-            "trading_halted": self.session_scheduler.is_trading_halted
-            if self.session_scheduler
-            else False,
+            "trading_halted": self.session_scheduler.is_trading_halted if self.session_scheduler else False,
             "startup_reconciliation_done": (
-                self.session_scheduler.startup_reconciliation_done
-                if self.session_scheduler
-                else False
+                self.session_scheduler.startup_reconciliation_done if self.session_scheduler else False
             ),
             "data_freshness": data_freshness,
             "database_health": db,
@@ -287,7 +275,11 @@ class AlertHandler:
     pager, or log file + external API).
     """
 
-    def __init__(self, channel_a=None, channel_b=None):
+    def __init__(
+        self,
+        channel_a: Callable[[str], None] | None = None,
+        channel_b: Callable[[str], None] | None = None,
+    ) -> None:
         """Initialize alert handler with two channels.
 
         Args:
@@ -301,12 +293,14 @@ class AlertHandler:
     def _default_channel_a(message: str) -> None:
         """Default channel A: stderr log prefix [ALERT-CHAN-A]."""
         import sys
+
         print(f"[ALERT-CHAN-A] {message}", file=sys.stderr)
 
     @staticmethod
     def _default_channel_b(message: str) -> None:
         """Default channel B: stderr log prefix [ALERT-CHAN-B]."""
         import sys
+
         print(f"[ALERT-CHAN-B] {message}", file=sys.stderr)
 
     def alert(self, message: str, severity: str = "CRITICAL") -> None:
@@ -379,7 +373,15 @@ class ShadowSessionOperator:
         V1: Full risk decision, hypothetical order generation, NO broker submission.
         Returns dict with decision, hypothetical order, and monitoring metrics.
         """
-        from trading_platform.domain import Instrument, OrderSide, OrderType, TimeInForce, Order, OrderStatus, Signal
+        from trading_platform.domain import (
+            Instrument,
+            Order,
+            OrderSide,
+            OrderStatus,
+            OrderType,
+            Signal,
+            TimeInForce,
+        )
 
         # Record signal
         self.monitor.record_signal()
@@ -414,58 +416,20 @@ class ShadowSessionOperator:
         positions = signal_data.get("positions", {})
         current_cash = signal_data.get("cash", 10000.0)
 
-        approved, reason, policy = self.risk_engine.check_order(
-            order, positions, current_cash
-        )
+        approved, reason, policy = self.risk_engine.check_order(order, positions, current_cash)
 
         # Record latency
         import time
+
         start = time.time()
         # (Risk check already done above)
         latency_ms = (time.time() - start) * 1000
         self.monitor.record_decision_latency(latency_ms)
 
-        # Generate hypothetical fill (deterministic, no broker)
+        # Shadow mode records an intent only. It must not manufacture a fill or
+        # invoke any broker-shaped object; execution belongs to simulation or
+        # the separately authorized paper boundary.
         hypothetical_fill = None
-        if approved:
-            # Create a deterministic fill assumption
-            from trading_platform.simulator.event_driven_simulator import (
-                FillAssumption,
-                CommissionModel,
-            )
-            from trading_platform.simulator.event_driven_simulator import (
-                EventDrivenSimulator,
-            )
-
-            # Use MARKET fill assumption at CLOSE price
-            fake_broker = type(
-                "FakeFillBroker",
-                (object,),
-                {
-                    "execute_order": lambda self, o, b: {
-                        "order_id": o.order_id,
-                        "symbol": o.instrument.symbol,
-                        "side": o.side,
-                        "quantity": o.quantity,
-                        "fill_price": b.close if hasattr(b, "close") else o.price or 0.0,
-                        "commission": 1.0,
-                        "slippage": 0.0,
-                        "status": "FILLED",
-                        "fill_quantity": o.quantity,
-                    }
-                },
-            )()
-
-            bar = type("Bar", (), {"close": bar_price})() if bar_price else type("Bar", (), {"close": 0.0})()
-            execution = fake_broker.execute_order(order, bar)
-
-            hypothetical_fill = {
-                "fill_price": execution["fill_price"],
-                "commission": execution["commission"],
-                "slippage": execution["slippage"],
-                "status": execution["status"],
-                "fill_quantity": execution["fill_quantity"],
-            }
 
         # Reconcile after hypothetical fill
         if hypothetical_fill and hypothetical_fill["status"] == "FILLED":
@@ -484,7 +448,12 @@ class ShadowSessionOperator:
             recon_result = {
                 "overall_status": "PASS",
                 "errors": [],
-                "details": {"cash": "OK", "positions": "OK", "orders": "OK", "fills": "SKIPPED"},
+                "details": {
+                    "cash": "OK",
+                    "positions": "OK",
+                    "orders": "OK",
+                    "fills": "SKIPPED",
+                },
             }
 
         # Update monitoring

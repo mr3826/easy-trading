@@ -1,12 +1,33 @@
 """Phase 6 comprehensive integration test - Production OMS, Hard Risk Engine, Reconciliation."""
+
 import sys
 from datetime import datetime
+
 sys.path.insert(0, r"D:\hexabyte_technologies\easy-trading\trading-platform\src")
 
 import pytest
-from trading_platform.oms.oms import OMS, IdempotencyKey, OCAGroup, FakeBroker, OrderLifecycle
-from trading_platform.risk.risk_engine import HardRiskEngine, RiskPolicyVersion, ReconciliationEngine, SessionScheduler
-from trading_platform.domain import Instrument, Order, OrderSide, OrderType, TimeInForce, Signal, OrderStatus
+from trading_platform.oms.oms import (
+    OMS,
+    IdempotencyKey,
+    OCAGroup,
+    FakeBroker,
+    OrderLifecycle,
+)
+from trading_platform.risk.risk_engine import (
+    HardRiskEngine,
+    RiskPolicyVersion,
+    ReconciliationEngine,
+    SessionScheduler,
+)
+from trading_platform.domain import (
+    Instrument,
+    Order,
+    OrderSide,
+    OrderType,
+    TimeInForce,
+    Signal,
+    OrderStatus,
+)
 from trading_platform.strategies.ma_cross_strategy import MaCrossHypothesis
 
 
@@ -106,14 +127,24 @@ def test_oca_group():
         time_in_force=TimeInForce.DAY,
     )
     order_a = Order(
-        order_id="oca-a", instrument=inst, side=OrderSide.BUY, quantity=10,
-        price=None, order_type=OrderType.MARKET, time_in_force=TimeInForce.DAY,
+        order_id="oca-a",
+        instrument=inst,
+        side=OrderSide.BUY,
+        quantity=10,
+        price=None,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.DAY,
         status=OrderStatus.SUBMITTED,
         signal=signal,
     )
     order_b = Order(
-        order_id="oca-b", instrument=inst, side=OrderSide.SELL, quantity=10,
-        price=None, order_type=OrderType.MARKET, time_in_force=TimeInForce.DAY,
+        order_id="oca-b",
+        instrument=inst,
+        side=OrderSide.SELL,
+        quantity=10,
+        price=None,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.DAY,
         status=OrderStatus.SUBMITTED,
         signal=signal,
     )
@@ -131,8 +162,11 @@ def test_hard_risk_engine():
     """Test Hard Risk Engine with versioned policies."""
     risk_engine = HardRiskEngine()
     policy = RiskPolicyVersion(
-        version=1, max_positions=3, max_gross_exposure=1_000_000.0,
-        max_drawdown_pct=10.0, max_turnover_pct=20.0
+        version=1,
+        max_positions=3,
+        max_gross_exposure=1_000_000.0,
+        max_drawdown_pct=10.0,
+        max_turnover_pct=20.0,
     )
     risk_engine.add_policy(policy)
     assert risk_engine.active_policy is not None
@@ -176,5 +210,5 @@ def test_broker_contract():
     oms = OMS(oms_id="broker-contract-test")
     fake_broker = FakeBroker(oms, fill_assumption="CLOSE")
 
-    assert hasattr(fake_broker, 'execute_order')
-    assert hasattr(fake_broker, 'cancel_all_orders')
+    assert hasattr(fake_broker, "execute_order")
+    assert hasattr(fake_broker, "cancel_all_orders")

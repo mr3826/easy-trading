@@ -1,8 +1,10 @@
-"""Phase 6 walk-forward module tests."""
+"""Phase 6 walk-forward module tests - direct imports."""
+
 from datetime import datetime
-from trading_platform.walk_forward.walk_forward import PeriodSplit, WalkForwardEvaluator
+
+from trading_platform.persistence.experiment import ExperimentRecord
 from trading_platform.strategies.ma_cross_strategy import MaCrossHypothesis
-from trading_platform.persistence.experiment import ExperimentRegistry, ExperimentRecord
+from trading_platform.walk_forward.walk_forward import PeriodSplit
 
 
 def test_period_split_creation():

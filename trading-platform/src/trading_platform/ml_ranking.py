@@ -7,15 +7,16 @@ Provides infrastructure for:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any, Tuple
-import json
 import hashlib
-
+import json
+import math
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # ML Candidate Registry
 # ---------------------------------------------------------------------------
+
 
 class MLCandidate:
     """Registered ML candidate for Stage A ranking.
@@ -49,11 +50,17 @@ class MLCandidate:
         self.metrics = metrics
         self.creation_date = creation_date
         self.environment = environment
-        self.promotion_evidence: Optional[Dict[str, any]] = None
+        self.promotion_evidence: Optional[Dict[str, Any]] = None
         self.rejected: bool = False
         self.reject_reason: Optional[str] = None
 
-    def to_dict(self) -> dict:
+    def is_feature_leakage(self, feature: str, decision_timestamp: datetime) -> bool:
+        """Reject a feature decision that is not strictly out of sample."""
+        if feature not in self.features:
+            return True
+        return decision_timestamp <= self.training_period_end
+
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "candidate_id": self.candidate_id,
             "model_name": self.model_name,
@@ -72,8 +79,9 @@ class MLCandidate:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "MLCandidate":
+    def from_dict(cls, data: Dict[str, Any]) -> "MLCandidate":
         from datetime import datetime
+
         return cls(
             candidate_id=data["candidate_id"],
             model_name=data["model_name"],
@@ -96,9 +104,9 @@ class MLCandidateRegistry:
     by enforcing chronological label definitions and dataset versioning.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.candidates: Dict[str, MLCandidate] = {}
-        self.registered_features: set = set()
+        self.registered_features: set[str] = set()
 
     def register(
         self,
@@ -110,9 +118,7 @@ class MLCandidateRegistry:
         duplicate registration / tuning on the same trial).
         """
         if candidate.candidate_id in self.candidates:
-            raise ValueError(
-                f"Candidate ID {candidate.candidate_id} already registered"
-            )
+            raise ValueError(f"Candidate ID {candidate.candidate_id} already registered")
         # Prevent feature leakage: ensure training period is strictly before
         # any decision timestamps in the forward test
         self.candidates[candidate.candidate_id] = candidate
@@ -127,10 +133,7 @@ class MLCandidateRegistry:
 
     def get_active(self) -> List[MLCandidate]:
         """Get all non-rejected candidates."""
-        return [
-            c for c in self.candidates.values()
-            if not c.rejected
-        ]
+        return [c for c in self.candidates.values() if not c.rejected]
 
     def reject(self, candidate_id: str, reason: str) -> None:
         """Reject a candidate.
@@ -142,16 +145,14 @@ class MLCandidateRegistry:
             self.candidates[candidate_id].rejected = True
             self.candidates[candidate_id].reject_reason = reason
 
-    def is_feature_leakage(
-        self, feature: str, decision_timestamp: datetime
-    ) -> bool:
+    def is_feature_leakage(self, feature: str, decision_timestamp: datetime) -> bool:
         """Check if using a feature at a decision timestamp would cause leakage.
 
         V1: Returns True if the feature's data is not point-in-time before
         the decision timestamp.
         """
         if feature not in self.registered_features:
-            return False  # Unknown feature - conservatively allow
+            return True
         # In V1, we conservatively flag potential leakage
         # Full check would require comparing feature timestamps to decision timestamps
         return False
@@ -178,12 +179,12 @@ class MLRanker:
         self,
         base_metrics: Dict[str, float],
         ranker_metrics: Dict[str, float],
-    ) -> Dict[str, any]:
+    ) -> Dict[str, Any]:
         """Compare BASELINE vs BASELINE + RANKER metrics.
 
         V1: Returns comparison result with eligibility determination.
         """
-        comparison: dict = {
+        comparison: Dict[str, Any] = {
             "comparison_timestamp": datetime.now(timezone.utc).isoformat(),
             "base_candidate": self.base_candidate_id,
             "ranker_candidate": self.ranker_candidate_id,
@@ -231,29 +232,21 @@ class MLRanker:
         if expectancy_delta > 0:
             durable_benefits.append("higher risk-adjusted return")
         if sharpe_delta > 0:
-            durable_benefits.append(
-                "similar return with lower drawdown or better risk-adjusted return"
-            )
+            durable_benefits.append("similar return with lower drawdown or better risk-adjusted return")
         if dd_improvement > 0:
             durable_benefits.append("similar return with lower drawdown")
         if trade_reduction > 0:
-            durable_benefits.append(
-                "similar return with fewer trades/lower costs"
-            )
+            durable_benefits.append("similar return with fewer trades/lower costs")
         if cost_reduction > 0:
             durable_benefits.append("similar return with lower costs")
 
-        comparison["durable_benefit"] = (
-            durable_benefits if durable_benefits else None
-        )
+        comparison["durable_benefit"] = durable_benefits if durable_benefits else None
 
         # V1: AI qualifies only if it provides at least one durable benefit
         if durable_benefits:
             comparison["eligibility"] = "QUALIFIED"
         else:
-            comparison["eligibility"] = (
-                "REJECTED - no durable benefit after costs and risk"
-            )
+            comparison["eligibility"] = "REJECTED - no durable benefit after costs and risk"
 
         return comparison
 
@@ -294,18 +287,20 @@ class LLMSentimentFeature:
         prompt_template: str,
         creation_date: datetime,
         validation_mode: str = "forward_test",
+        allowed_symbols: Optional[set[str]] = None,
     ):
         self.feature_id = feature_id
         self.model_name = model_name
         self.prompt_template = prompt_template
         self.creation_date = creation_date
         self.validation_mode = validation_mode
+        self.allowed_symbols = allowed_symbols or set()
         self.tested_forward_dates: List[datetime] = []
-        self.validation_results: Optional[Dict[str, any]] = None
-        self.promotion_evidence: Optional[Dict[str, any]] = None
-        self._validator_hooks: List[callable] = []
+        self.validation_results: Optional[Dict[str, Any]] = None
+        self.promotion_evidence: Optional[Dict[str, Any]] = None
+        self._validator_hooks: List[Callable[[str], Any]] = []
 
-    def add_validator(self, validator_func) -> None:
+    def add_validator(self, validator_func: Callable[[str], Any]) -> None:
         """Add a validation hook for LLM output.
 
         V1: Hooks test prompt injection, invalid JSON, unknown symbols,
@@ -313,12 +308,12 @@ class LLMSentimentFeature:
         """
         self._validator_hooks.append(validator_func)
 
-    def validate_output(self, output: str) -> Dict[str, any]:
+    def validate_output(self, output: str) -> Dict[str, Any]:
         """Validate LLM output through registered hooks.
 
         V1: Returns validation result with any errors detected.
         """
-        result: Dict[str, any] = {
+        result: Dict[str, Any] = {
             "valid": True,
             "errors": [],
             "parsed_data": None,
@@ -331,30 +326,57 @@ class LLMSentimentFeature:
                 result["valid"] = False
                 result["errors"].append(f"Prompt injection pattern detected: {pattern}")
 
-        # Hook: check for valid JSON (if output claims to be JSON)
+        # AI output is an API boundary, not free-form text. Invalid JSON is
+        # rejected rather than being interpreted by downstream code.
         try:
             parsed = json.loads(output)
             result["parsed_data"] = parsed
         except json.JSONDecodeError:
-            # Not JSON - that's OK for some prompt formats
-            pass
+            result["valid"] = False
+            result["errors"].append("FEATURE_REJECTED: invalid JSON")
+
+        if not isinstance(result["parsed_data"], dict):
+            result["valid"] = False
+            result["errors"].append("FEATURE_REJECTED: object schema required")
+        else:
+            required = {"symbol", "sentiment", "confidence", "observed_at"}
+            if set(result["parsed_data"]) != required:
+                result["valid"] = False
+                result["errors"].append("FEATURE_REJECTED: schema violation")
+            symbol = result["parsed_data"].get("symbol")
+            if not isinstance(symbol, str) or symbol not in self.allowed_symbols:
+                result["valid"] = False
+                result["errors"].append("FEATURE_REJECTED: unknown symbol")
 
         # Hook: check for NaN or impossible confidence
         if result["parsed_data"]:
             if "confidence" in result["parsed_data"]:
                 conf = result["parsed_data"]["confidence"]
-                if conf is not None and (conf < 0 or conf > 1):
+                invalid_confidence = (
+                    not isinstance(conf, (int, float))
+                    or isinstance(conf, bool)
+                    or not math.isfinite(float(conf))
+                    or conf < 0
+                    or conf > 1
+                )
+                if invalid_confidence:
                     result["valid"] = False
-                    result["errors"].append(
-                        f"Impossible confidence value: {conf}"
-                    )
-            if "probability" in result["parsed_data"]:
-                prob = result["parsed_data"]["probability"]
-                if prob is not None and (prob < 0 or prob > 1):
-                    result["valid"] = False
-                    result["errors"].append(
-                        f"Impossible probability value: {prob}"
-                    )
+                    result["errors"].append(f"Impossible confidence value: {conf}")
+            sentiment = result["parsed_data"].get("sentiment")
+            invalid_sentiment = (
+                not isinstance(sentiment, (int, float))
+                or isinstance(sentiment, bool)
+                or not math.isfinite(float(sentiment))
+                or sentiment < -1
+                or sentiment > 1
+            )
+            if invalid_sentiment:
+                result["valid"] = False
+                result["errors"].append(f"Invalid sentiment value: {sentiment}")
+            observed_at = result["parsed_data"].get("observed_at")
+            if not isinstance(observed_at, str) or not observed_at.strip():
+                result["valid"] = False
+                result["errors"].append("FEATURE_REJECTED: missing provenance")
 
         # Run all registered validator hooks
         for hook in self._validator_hooks:
@@ -369,7 +391,7 @@ class LLMSentimentFeature:
 
         return result
 
-    def record_forward_test(self, forward_date: datetime, result: dict) -> None:
+    def record_forward_test(self, forward_date: datetime, result: Dict[str, Any]) -> None:
         """Record a forward test result.
 
         V1: Default policy: forward-test LLM news features only.
@@ -390,9 +412,9 @@ class LLMLLMFeatureManager:
     order-submission capability.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.features: Dict[str, LLMSentimentFeature] = {}
-        self.forward_test_history: List[dict] = []
+        self.forward_test_history: List[Dict[str, Any]] = []
 
     def register_feature(self, feature: LLMSentimentFeature) -> None:
         """Register an LLM news sentiment feature."""
@@ -402,9 +424,7 @@ class LLMLLMFeatureManager:
         """Get a registered LLM feature by ID."""
         return self.features.get(feature_id)
 
-    def forward_test_feature(
-        self, feature_id: str, forward_date: datetime, llm_output: str
-    ) -> Dict[str, any]:
+    def forward_test_feature(self, feature_id: str, forward_date: datetime, llm_output: str) -> Dict[str, Any]:
         """Run a forward test of an LLM news feature.
 
         V1: Validates LLM output, records the test result, and determines
@@ -421,19 +441,21 @@ class LLMLLMFeatureManager:
         validation = feature.validate_output(llm_output)
 
         # Record the forward test
-        feature.record_forward_test(forward_date, {
-            "llm_output": llm_output[:100] + "..." if len(llm_output) > 100 else llm_output,
-            "validation": validation,
-            "date": forward_date.isoformat(),
-        })
+        feature.record_forward_test(
+            forward_date,
+            {
+                "llm_output_sha256": hashlib.sha256(llm_output.encode("utf-8")).hexdigest(),
+                "validation": validation,
+                "date": forward_date.isoformat(),
+            },
+        )
 
         # Determine eligibility
         eligibility = "REJECTED - LLM default: forward-test only"
         if feature.validation_mode == "forward_test":
             # LLM must be re-tested in forward direction
             eligibility = (
-                "FORWARD_TEST - LLM approved for forward testing only, "
-                "not for promotion evidence from historical data"
+                "FORWARD_TEST - LLM approved for forward testing only, not for promotion evidence from historical data"
             )
         elif feature.validation_mode == "point_in_time":
             # Only suitable if model and corpus are demonstrably point-in-time
@@ -456,9 +478,9 @@ class LLMLLMFeatureManager:
 
         V1: Essential security check to prevent prompt injection attacks.
         """
-        injection_patterns = ["<|prompt|>", "<|system|>", "<?>"]
+        injection_patterns = ["<|prompt|>", "<|system|>", "<?>", "ignore previous", "system message"]
         for pattern in injection_patterns:
-            if pattern in output:
+            if pattern.lower() in output.lower():
                 return True
         return False
 
