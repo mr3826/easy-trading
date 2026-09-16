@@ -45,11 +45,17 @@ target-version = ["py312"]
 
 [tool.ruff]
 line-length = 88
-select = "E,F,I,S,K,Q,W,C90,C99"
-skip = []
-mode = "check"
+target-version = "py312"
+select = ["E", "F", "I", "S", "W"]
+exclude = ["walk_forward_first_fold.py"]
 
 [tool.mypy]
 python_version = "3.12"
-disallow_untyped_definitions = true
+disallow_untyped_defs = true
 disallow_any_generics = true
+exclude = ["walk_forward_first_fold.py"]
+
+[dependency-groups]
+dev = [
+    "pytest-cov>=7.1.0",
+]

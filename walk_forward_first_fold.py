@@ -94,33 +94,42 @@ print(f"  Test:  {len(test_dates)} days ({periods['test'][0]} to {periods['test'
 # 4. Generate mock bar data for each period
 bars_by_symbol = {
     "AAPL": {
-        **{d.isoformat(): [type("Bar", (), {
-            "instrument": type("Inst", (), {"symbol": "AAPL"})(),
-            "timestamp": datetime.datetime(d.year, d.month, d.day, 16, 0, 0),
-            "open": 100.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
-            "high": 102.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
-            "low": 98.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
-            "close": 100.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
-            "volume": 1000,
-        })() for d in train_dates if d.isoformat() in [x.isoformat() for x in train_dates]],
-        **{d.isoformat(): [type("Bar", (), {
-            "instrument": type("Inst", (), {"symbol": "AAPL"})(),
-            "timestamp": datetime.datetime(d.year, d.month, d.day, 16, 0, 0),
-            "open": 100.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
-            "high": 102.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
-            "low": 98.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
-            "close": 100.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
-            "volume": 1000,
-        })() for d in val_dates if d.isoformat() in [x.isoformat() for x in val_dates]],
-        **{d.isoformat(): [type("Bar", (), {
-            "instrument": type("Inst", (), {"symbol": "AAPL"})(),
-            "timestamp": datetime.datetime(d.year, d.month, d.day, 16, 0, 0),
-            "open": 100.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
-            "high": 102.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
-            "low": 98.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
-            "close": 100.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
-            "volume": 1000,
-        })() for d in test_dates if d.isoformat() in [x.isoformat() for x in test_dates]],
+        **{d.isoformat(): [
+            type("Bar", (), {
+                "instrument": type("Inst", (), {"symbol": "AAPL"})(),
+                "timestamp": datetime.datetime(d.year, d.month, d.day, 16, 0, 0),
+                "open": 100.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
+                "high": 102.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
+                "low": 98.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
+                "close": 100.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
+                "volume": 1000,
+            })
+            for d in train_dates if d.isoformat() in [x.isoformat() for x in train_dates]
+        ],
+        **{d.isoformat(): [
+            type("Bar", (), {
+                "instrument": type("Inst", (), {"symbol": "AAPL"})(),
+                "timestamp": datetime.datetime(d.year, d.month, d.day, 16, 0, 0),
+                "open": 100.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
+                "high": 102.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
+                "low": 98.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
+                "close": 100.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
+                "volume": 1000,
+            })
+            for d in val_dates if d.isoformat() in [x.isoformat() for x in val_dates]
+        ],
+        **{d.isoformat(): [
+            type("Bar", (), {
+                "instrument": type("Inst", (), {"symbol": "AAPL"})(),
+                "timestamp": datetime.datetime(d.year, d.month, d.day, 16, 0, 0),
+                "open": 100.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
+                "high": 102.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
+                "low": 98.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
+                "close": 100.0 + (d.day % 20 - 10) * 0.5 + (d.month % 12 - 6) * 0.3,
+                "volume": 1000,
+            })
+            for d in test_dates if d.isoformat() in [x.isoformat() for x in test_dates]
+        ],
     }
 }
 
