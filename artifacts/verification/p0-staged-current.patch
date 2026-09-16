@@ -1,0 +1,16 @@
+diff --git a/test_phase4.py b/trading-platform/tests/integration/test_phase4.py
+similarity index 100%
+rename from test_phase4.py
+rename to trading-platform/tests/integration/test_phase4.py
+diff --git a/phase6_integration_test.py b/trading-platform/tests/integration/test_phase6_integration.py
+similarity index 100%
+rename from phase6_integration_test.py
+rename to trading-platform/tests/integration/test_phase6_integration.py
+diff --git a/test_wf.py b/trading-platform/tests/integration/test_walk_forward_periods.py
+similarity index 100%
+rename from test_wf.py
+rename to trading-platform/tests/integration/test_walk_forward_periods.py
+diff --git a/test_wf2.py b/trading-platform/tests/integration/test_walk_forward_periods_retried.py
+similarity index 100%
+rename from test_wf2.py
+rename to trading-platform/tests/integration/test_walk_forward_periods_retried.py
