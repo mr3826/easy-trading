@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum, auto
@@ -12,12 +13,17 @@ class InstrumentType(Enum):
     INDEX = auto()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class Instrument:
     symbol: str
     instrument_type: InstrumentType = InstrumentType.STOCK
     exchange: str = "SMART"
     currency: str = "USD"
+
+    def __post_init__(self) -> None:
+        self.symbol = self.symbol.strip().upper()
+        if not self.symbol or any(ch.isspace() for ch in self.symbol):
+            raise ValueError("instrument symbol must be non-empty and contain no spaces")
 
     def __hash__(self) -> int:
         return hash(self.symbol)
@@ -33,7 +39,7 @@ class TradingSession(Enum):
     OVERNIGHT = auto()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class Bar:
     instrument: Instrument
     timestamp: datetime
@@ -44,12 +50,22 @@ class Bar:
     volume: int
     session: TradingSession = TradingSession.DAY
 
+    def __post_init__(self) -> None:
+        _require_utc(self.timestamp)
+        prices = (self.open, self.high, self.low, self.close)
+        if any(not math.isfinite(price) or price <= 0 for price in prices):
+            raise ValueError("bar prices must be finite and positive")
+        if self.high < max(self.open, self.close) or self.low > min(self.open, self.close):
+            raise ValueError("bar OHLC values are inconsistent")
+        if self.volume < 0:
+            raise ValueError("bar volume cannot be negative")
+
     @property
     def bar_date(self) -> str:
         return self.timestamp.astimezone(timezone.utc).strftime("%Y-%m-%d")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class CorporateAction:
     instrument: Instrument
     action_type: str  # "split", "dividend", "reverse_split", "delisting"
@@ -61,6 +77,7 @@ class CorporateAction:
 
 
 # ---- Order-related types ----
+
 
 class OrderSide(Enum):
     BUY = auto()
@@ -81,7 +98,7 @@ class TimeInForce(Enum):
     FOK = auto()  # Fill or Kill
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class Signal:
     instrument: Instrument
     side: OrderSide
@@ -91,15 +108,21 @@ class Signal:
     time_in_force: TimeInForce
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if self.quantity <= 0:
+            raise ValueError("signal quantity must be positive")
+        if self.price is not None and (not math.isfinite(self.price) or self.price <= 0):
+            raise ValueError("signal price must be finite and positive")
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=False)
 class OrderIntent:
     signal: Signal
     order_id: str
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class RiskDecision:
     order_intent: OrderIntent
     approved: bool
@@ -109,7 +132,7 @@ class RiskDecision:
     approved_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class Order:
     order_id: str
     instrument: Instrument
@@ -119,7 +142,7 @@ class Order:
     order_type: OrderType
     time_in_force: TimeInForce
     status: OrderStatus
-    signal: Signal
+    signal: Signal | None
     risk_decision: RiskDecision | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     filled_at: datetime | None = None
@@ -127,25 +150,36 @@ class Order:
     filled_quantity: int | None = None
     average_fill_price: float | None = None
 
+    def __post_init__(self) -> None:
+        if self.quantity <= 0:
+            raise ValueError("order quantity must be positive")
+        if self.price is not None and (not math.isfinite(self.price) or self.price <= 0):
+            raise ValueError("order price must be finite and positive")
+        _require_utc(self.created_at)
+
 
 class OrderStatus(Enum):
     SUBMITTED = auto()
     RECEIVED = auto()
+    ACCEPTED = auto()
+    OPEN = auto()
     PARTIALLY_FILLED = auto()
     FILLED = auto()
     CANCELLED = auto()
     REJECTED = auto()
     EXPIRED = auto()
+    # Spelling alias used by the OMS lifecycle.
+    CANCELED = CANCELLED
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class OrderLeg:
     leg_id: str
     order: Order
     parent_order_id: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class Execution:
     execution_id: str
     order_id: str
@@ -158,7 +192,7 @@ class Execution:
     trade_id: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class Position:
     instrument: Instrument
     quantity: int
@@ -173,17 +207,17 @@ class Position:
         return self.quantity * self.average_cost
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class PortfolioSnapshot:
     timestamp: datetime
     cash: float
-    positions: Dict[Instrument, Position]
+    positions: Dict[str, Position]
     gross_exposure: float
     net_exposure: float
     total_pnl: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class BrokerSnapshot:
     timestamp: datetime
     positions: Dict[Instrument, float]
@@ -193,7 +227,7 @@ class BrokerSnapshot:
     status: str = "connected"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class ReconciliationResult:
     timestamp: datetime
     differences: Dict[str, Any]
@@ -217,6 +251,14 @@ class JournalEvent:
     source: str
     checksum: str
 
+    def __post_init__(self) -> None:
+        _require_utc(self.timestamp)
+
     @property
     def event_date(self) -> str:
         return self.timestamp.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _require_utc(value: datetime) -> None:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("timestamps must be timezone-aware")

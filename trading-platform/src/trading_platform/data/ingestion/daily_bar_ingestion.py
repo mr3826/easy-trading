@@ -1,22 +1,20 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List
 
 import pandas as pd
 
 from trading_platform.data import (
     CorporateAction,
     CorporateActionType,
-    DataFrequency,
     DataMetadata,
-    DataStatus,
     MarketDataProvider,
-    validate_data_integrity,
     validate_bar,
+    validate_data_integrity,
 )
-from trading_platform.domain import Bar, Instrument, TradingSession
+from trading_platform.domain import Bar, Instrument
 
 
 class IngestionResult:
@@ -25,7 +23,7 @@ class IngestionResult:
     def __init__(
         self,
         success: bool,
-        bars: List[Bar] = None,
+        bars: List[Bar] | None = None,
         metadata: DataMetadata | None = None,
         errors: List[str] | None = None,
         warnings: List[str] | None = None,
@@ -49,6 +47,7 @@ class DailyBarIngestion:
     def __init__(self, data_provider: MarketDataProvider):
         self.data_provider = data_provider
         self._universe: set[Instrument] | None = None  # Engineering universe
+        self._research_universe: set[Instrument] | None = None
 
     def set_engineering_universe(self, universe: set[Instrument]) -> None:
         """Set the engineering universe - a small fixed list for plumbing tests."""
@@ -58,9 +57,7 @@ class DailyBarIngestion:
         """Set the research universe - point-in-time membership including removed/delisted names."""
         self._research_universe = universe
 
-    def ingest_symbol(
-        self, symbol: str, start: datetime, end: datetime
-    ) -> IngestionResult:
+    def ingest_symbol(self, symbol: str, start: datetime, end: datetime) -> IngestionResult:
         """Ingest daily bars for a single symbol within the date range.
 
         Returns IngestionResult with bars, metadata, and any errors/warnings.
@@ -84,18 +81,20 @@ class DailyBarIngestion:
         bars = self.data_provider.get_bars(instrument, start, end)
 
         # Validate bar integrity
+        validation_errors: List[str] = []
+        validation_warnings: List[str] = []
         valid_bars: List[Bar] = []
         for bar in bars:
             is_valid, error = validate_bar(bar)
             if is_valid:
                 valid_bars.append(bar)
-            else:
-                self._errors.append(error) if hasattr(self, "_errors") else None
+            elif error is not None:
+                validation_errors.append(error)
 
         # Validate overall data integrity
         integrity_ok, integrity_errors = validate_data_integrity(valid_bars)
         if not integrity_ok:
-            warnings = integrity_errors if not hasattr(self, "_warnings") else self._warnings + integrity_errors
+            validation_warnings.extend(integrity_errors)
 
         # Apply corporate actions if needed
         # ... (future: adjust bars for splits/dividends)
@@ -103,14 +102,14 @@ class DailyBarIngestion:
         metadata = self.data_provider.get_metadata(instrument)
 
         return IngestionResult(
-            success=True,
+            success=not validation_errors,
             bars=valid_bars,
             metadata=metadata,
+            errors=validation_errors,
+            warnings=validation_warnings,
         )
 
-    def ingest_universe(
-        self, symbols: List[str], start: datetime, end: datetime
-    ) -> Dict[str, IngestionResult]:
+    def ingest_universe(self, symbols: List[str], start: datetime, end: datetime) -> Dict[str, IngestionResult]:
         """Ingest bars for multiple symbols.
 
         Returns dict mapping symbol -> IngestionResult.
@@ -136,11 +135,7 @@ def load_parquet_data(data_dir: Path, symbol: str) -> pd.DataFrame:
 
     # Ensure timestamp column is datetime with UTC timezone
     if "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize(
-            tz=timezone.utc
-        ) if df["timestamp"].dt.tz is None else df["timestamp"].dt.tz_convert(
-                tz=timezone.utc
-            )
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
 
     # Ensure numeric columns
     for col in ["open", "high", "low", "close", "volume"]:
@@ -171,8 +166,7 @@ def apply_split_adjustment(
 
     # Find splits that occurred before the reference timestamp
     applicable_splits = [
-        s for s in splits
-        if s.ex_date <= reference_timestamp and s.action_type == CorporateActionType.SPLIT
+        s for s in splits if s.ex_date <= reference_timestamp and s.action_type == CorporateActionType.SPLIT
     ]
 
     if not applicable_splits:

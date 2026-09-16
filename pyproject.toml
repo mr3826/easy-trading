@@ -1,47 +1,72 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+requires = ["setuptools>=70.0", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "trading-platform"
 version = "1.0.0"
-description = "AI Trading Platform — Phase-by-Phase Execution Plan"
+description = "AI Trading Platform"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.7.0",
-    "postgresql>=asyncpg",
-    "parquet-format>=3.0.0",
+    "asyncpg>=0.29.0",
 ]
 
-[project.tool.setuptools.packages.find]
-where = ["src"]
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "coverage>=7.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
+    "pip-audit>=2.0",
+    "psycopg2-binary>=2.9",
+    "numpy>=1.24.0",
+    "pandas>=2.1.0",
+    "hypothesis>=6.100.0",
+    "pytest-cov>=5.0.0",
+    "pyarrow>=15.0.0",
+    "cryptography>=42.0.0",
+]
+
+[project.scripts]
+trading-platform = "trading_platform.cli:main"
+dead-man-monitor = "trading_platform.dead_man:main"
+
+[tool.setuptools.packages.find]
+where = ["trading-platform/src"]
+include = ["trading_platform*"]
+
+[tool.pytest.ini_options]
+testpaths = ["trading-platform/tests"]
+addopts = "--tb=short -q"
+markers = [
+    "gate(name): mark test as belonging to a promotion gate",
+    "external: mark test as requiring external setup",
+    "integration: mark integration tests",
+    "postgres: mark tests requiring an isolated PostgreSQL service",
+]
 
 [tool.black]
 line-length = 88
 target-version = ["py312"]
 
 [tool.ruff]
-line-length = 88
-select = "E,F,I,S,K,Q,W,C90,C99"
-skip = ["migrations/*", "tests/fixture/*"]
-mode = "check"
+line-length = 120
+target-version = "py312"
+exclude = ["debug_*.py", "fix_*.py", "analyze_*.py", "show_*.py", "count_errors.py", "temp_check.py", "phase*_test.py", "test_phase*.py", "test_wf*.py", "phase*_demo.py", "docs/experiment-registry-schema.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+per-file-ignores = { "trading-platform/tests/**/*.py" = ["S101"], "*_test.py" = ["S101"] }
 
 [tool.mypy]
 python_version = "3.12"
-disallow_untyped_definitions = true
+disallow_untyped_defs = true
 disallow_any_generics = true
+check_untyped_defs = true
+ignore_missing_imports = true
 
-[tool.pytest]
-testpaths = ["tests"]
-addopts = "--tb=short -q"
-maxfail = 50
-log_cli = true
-markers = [
-    "gate(name): mark test as belonging to a promotion gate",
-]
-
-[tool.pre-commit]
-repo = "local"
-hooks = [
-    { id = "git-check-tip" },
+[dependency-groups]
+dev = [
+    "pytest-cov>=7.1.0",
 ]

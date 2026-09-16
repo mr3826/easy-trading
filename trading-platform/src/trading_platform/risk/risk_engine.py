@@ -22,28 +22,22 @@ Phase 7 additions:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any, Dict, List, Optional, Tuple
 
-from trading_platform.domain import Instrument, OrderSide, Order, OrderStatus
-from trading_platform.risk.limit import (
-    check_position_limit,
-    check_sector_concentration,
-    check_gross_exposure,
-    check_buying_power,
-    PortfolioRiskLimits,
-)
 from trading_platform.chaos_engine import (
-    FailureInjector,
-    FailureRecord,
-    FailureScenarios,
-    RunbookGenerator,
     DeadManHeartbeat,
-    FailureType,
 )
-
+from trading_platform.domain import Instrument, Order
+from trading_platform.risk.limits import (
+    PortfolioRiskLimits,
+    check_buying_power,
+    check_gross_exposure,
+    check_position_limit,
+)
 
 # ---------------------------------------------------------------------------
 # Versioned risk policy
+
 
 class RiskPolicyVersion:
     """Immutable versioned risk policy.
@@ -85,6 +79,7 @@ class RiskPolicyVersion:
 # ---------------------------------------------------------------------------
 # Hard risk engine
 
+
 class HardRiskEngine:
     """Versioned hard risk engine with persisted policy decisions.
 
@@ -99,15 +94,18 @@ class HardRiskEngine:
     All policy decisions are versioned and auditable.
     """
 
-    def __init__(self, policies: Optional[List[RiskPolicyVersion]] = None):
+    def __init__(self, policies: Optional[List[RiskPolicyVersion]] = None, oms: Any | None = None):
         # Policy history: most recent first
         self.policy_history: List[RiskPolicyVersion] = policies or []
         # Active policy (most recent with effective_from <= now)
-        self.active_policy: Optional[RiskPolicyVersion] = (
-            self.policy_history[0] if self.policy_history else None
-        )
+        self.active_policy: Optional[RiskPolicyVersion] = self.policy_history[0] if self.policy_history else None
         # Decision audit log: order_id -> (policy_version, decision, reason)
         self.decision_audit: List[tuple[int, str, str]] = []
+        self.strategy_disabled = False
+        self.disabled_symbols: set[str] = set()
+        self.new_positions_blocked = False
+        self.submissions_disabled = False
+        self.oms = oms
 
     # ---- Policy management ----
 
@@ -141,7 +139,7 @@ class HardRiskEngine:
         positions: Dict[str, Any],
         current_cash: float,
         portfolio_risk_limits: Optional[PortfolioRiskLimits] = None,
-    ) -> tuple[bool, str, RiskPolicyVersion]:
+    ) -> tuple[bool, str, Optional[RiskPolicyVersion]]:
         """Check if an order passes all risk constraints.
 
         Returns (approved, reason, active_policy).
@@ -152,22 +150,27 @@ class HardRiskEngine:
         pv = self.active_policy
         policy_version = pv.version
 
+        if self.submissions_disabled:
+            return False, "All submissions are disabled", pv
+        if self.strategy_disabled:
+            return False, "Strategy is disabled", pv
+        if order.instrument.symbol in self.disabled_symbols:
+            return False, f"Symbol {order.instrument.symbol} is disabled", pv
+        if self.new_positions_blocked and order.instrument.symbol not in positions:
+            return False, "New positions are blocked", pv
+        if order.side.name == "BUY" and (order.price is None or order.price <= 0):
+            return False, "Buy order requires a positive decision price", pv
+
         # 1. Position limit check
-        approved, reason = check_position_limit(
-            order.quantity, positions, order.instrument
-        )
+        approved, reason = check_position_limit(order.quantity, positions, order.instrument, pv.max_positions)
         if not approved:
-            self.decision_audit.append(
-                (policy_version, "REJECT", f"Position limit: {reason}")
-            )
+            self.decision_audit.append((policy_version, "REJECT", f"Position limit: {reason}"))
             return False, f"Position limit: {reason}", pv
 
         # 2. Gross exposure check
-        gross_approved, gross_reason = check_gross_exposure(positions)
+        gross_approved, gross_reason = check_gross_exposure(positions, pv.max_gross_exposure)
         if not gross_approved:
-            self.decision_audit.append(
-                (policy_version, "REJECT", f"Gross exposure: {gross_reason}")
-            )
+            self.decision_audit.append((policy_version, "REJECT", f"Gross exposure: {gross_reason}"))
             return False, f"Gross exposure: {gross_reason}", pv
 
         # 3. Sector concentration check
@@ -175,27 +178,23 @@ class HardRiskEngine:
         sector_approved = True
         sector_reason = "Sector map not available (implicitly limited by max positions)"
         try:
-            from trading_platform.risk.limit import check_sector_concentration
+            from trading_platform.risk.limits import check_sector_concentration
 
             sector_approved, sector_reason = check_sector_concentration(
-                order.instrument, positions, None  # sector_map omitted
+                order.instrument,
+                positions,
+                None,  # sector_map omitted
             )
         except Exception:
             sector_approved = True  # continue without sector check
         if not sector_approved:
-            self.decision_audit.append(
-                (policy_version, "REJECT", f"Sector concentration: {sector_reason}")
-            )
+            self.decision_audit.append((policy_version, "REJECT", f"Sector concentration: {sector_reason}"))
             return False, f"Sector concentration: {sector_reason}", pv
 
         # 3. Buying power check (cash account, no leverage)
-        buy_approved, buy_reason = check_buying_power(
-            order.quantity, order.price or 0, current_cash, positions
-        )
+        buy_approved, buy_reason = check_buying_power(order.quantity, order.price or 0, current_cash, positions)
         if not buy_approved:
-            self.decision_audit.append(
-                (policy_version, "REJECT", f"Buying power: {buy_reason}")
-            )
+            self.decision_audit.append((policy_version, "REJECT", f"Buying power: {buy_reason}"))
             return False, f"Buying power: {buy_reason}", pv
 
         # 4. Portfolio risk limits (drawdown, turnover, cash reserve)
@@ -207,16 +206,22 @@ class HardRiskEngine:
             # Turnover check (simplified)
             # Cash reserve check
             if self.active_policy.min_cash_reserve_pct > 0:
-                equity = current_cash + sum(
-                    abs(pos.market_value) for pos in positions.values()
-                )
+                equity = current_cash + sum(abs(pos.market_value) for pos in positions.values())
                 if equity > 0:
                     reserve_pct = (current_cash / equity) * 100
                     if reserve_pct < self.active_policy.min_cash_reserve_pct:
                         self.decision_audit.append(
-                            (policy_version, "REJECT", f"Cash reserve {reserve_pct:.1f}% < min {self.active_policy.min_cash_reserve_pct:.1f}%")
+                            (
+                                policy_version,
+                                "REJECT",
+                                f"Cash reserve {reserve_pct:.1f}% < min {self.active_policy.min_cash_reserve_pct:.1f}%",
+                            )
                         )
-                        return False, f"Cash reserve {reserve_pct:.1f}% < min {self.active_policy.min_cash_reserve_pct:.1f}%", pv
+                        return (
+                            False,
+                            f"Cash reserve {reserve_pct:.1f}% < min {self.active_policy.min_cash_reserve_pct:.1f}%",
+                            pv,
+                        )
 
         # 5. Strategy/symbol/position disable controls
         # V1: check if strategy is disabled, symbol is blocked, position limit reached
@@ -224,7 +229,11 @@ class HardRiskEngine:
 
         # All checks passed
         self.decision_audit.append(
-            (policy_version, "APPROVE", f"Order {order.order_id} approved across all {policy_version} policy checks")
+            (
+                policy_version,
+                "APPROVE",
+                f"Order {order.order_id} approved across all {policy_version} policy checks",
+            )
         )
         return True, f"Order approved by policy v{policy_version}", pv
 
@@ -232,45 +241,46 @@ class HardRiskEngine:
 
     def disable_strategy(self) -> None:
         """Disable strategy trading — no new orders accepted."""
+        self.strategy_disabled = True
         if self.active_policy:
-            self.active_policy.description = (
-                self.active_policy.description + " [STRATEGY DISABLED]"
-            )
+            self.active_policy.description = self.active_policy.description + " [STRATEGY DISABLED]"
 
     def disable_symbol(self, symbol: str) -> None:
         """Disable trading for a specific symbol."""
+        self.disabled_symbols.add(symbol)
         if self.active_policy:
-            self.active_policy.description = (
-                self.active_policy.description + f" [SYMBOL {symbol} DISABLED]"
-            )
+            self.active_policy.description = self.active_policy.description + f" [SYMBOL {symbol} DISABLED]"
 
     def block_new_positions(self) -> None:
         """Block all new position entries."""
+        self.new_positions_blocked = True
         if self.active_policy:
-            self.active_policy.description = (
-                self.active_policy.description + " [NEW POSITIONS BLOCKED]"
-            )
+            self.active_policy.description = self.active_policy.description + " [NEW POSITIONS BLOCKED]"
 
     def disable_all_submissions(self) -> None:
         """Disable all order submissions."""
+        self.submissions_disabled = True
         if self.active_policy:
-            self.active_policy.description = (
-                self.active_policy.description + " [ALL SUBMISSIONS DISABLED]"
-            )
+            self.active_policy.description = self.active_policy.description + " [ALL SUBMISSIONS DISABLED]"
 
     def cancel_all_open_orders(self) -> None:
         """Cancel all open orders — for session shutdown or emergency stop."""
-        # This would interface with the OMS; placeholder for now
-        pass
+        self.submissions_disabled = True
+        if self.oms is not None:
+            for order_id, order in list(self.oms.orders.items()):
+                if order.status.name in {"SUBMITTED", "ACCEPTED", "OPEN"}:
+                    self.oms.cancel_order(order_id, reason="RISK_EMERGENCY_STOP")
 
     def liquidate_position(self, instrument: Instrument) -> None:
         """Force liquidate a position for an instrument."""
-        # This would interface with the OMS; placeholder for now
-        pass
+        # Liquidation is intentionally separate from ordinary submissions. A
+        # caller must construct and authorize the liquidation order explicitly.
+        self.submissions_disabled = True
+        raise PermissionError(f"liquidation authorization required for {instrument.symbol}")
 
     # ---- Phase 7: Backup and restore ----
 
-    def export_state(self) -> dict:
+    def export_state(self) -> Dict[str, Any]:
         """Export the full engine state for backup.
 
         V1: Returns policy history, decision audit, and active policy
@@ -283,7 +293,7 @@ class HardRiskEngine:
             "exported_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    def import_state(self, state: dict) -> None:
+    def import_state(self, state: Dict[str, Any]) -> None:
         """Import engine state from a backup dict.
 
         V1: Replaces the current policy history and decision audit
@@ -297,6 +307,15 @@ class HardRiskEngine:
             # Reconstruct RiskPolicyVersion from dict
             from trading_platform.risk.risk_engine import RiskPolicyVersion
 
+            eff_from = p_dict.get("effective_from")
+            if eff_from is None:
+                effective_from = None
+            elif isinstance(eff_from, datetime):
+                effective_from = eff_from
+            else:
+                effective_from = datetime.fromisoformat(
+                    eff_from.isoformat() if hasattr(eff_from, "isoformat") else str(eff_from)
+                )
             pv = RiskPolicyVersion(
                 version=p_dict.get("version", 1),
                 max_positions=p_dict.get("max_positions", 3),
@@ -305,11 +324,7 @@ class HardRiskEngine:
                 max_drawdown_pct=p_dict.get("max_drawdown_pct", 10.0),
                 max_turnover_pct=p_dict.get("max_turnover_pct", 20.0),
                 min_cash_reserve_pct=p_dict.get("min_cash_reserve_pct", 5.0),
-                effective_from=datetime.fromisoformat(
-                    p_dict.get("effective_from", datetime.now(timezone.utc).isoformat())
-                )
-                if p_dict.get("effective_from")
-                else None,
+                effective_from=effective_from,
                 description=p_dict.get("description", ""),
             )
             self.policy_history.insert(0, pv)
@@ -323,10 +338,11 @@ class HardRiskEngine:
 
         # Log the import
         import logging
+
         logger = logging.getLogger("trading_platform.risk")
         logger.info(f"Risk engine state imported from backup: {state.get('exported_at', 'unknown')}")
 
-    def take_checkpoint(self) -> dict:
+    def take_checkpoint(self) -> Dict[str, Any]:
         """Take a snapshot/checkpoint of the current engine state.
 
         V1: Convenience wrapper around export_state for session-level
@@ -334,11 +350,11 @@ class HardRiskEngine:
         """
         return self.export_state()
 
+    # ---- Phase 7: Security checkpoint ----
 
-# ---- Phase 7: Security checkpoint ----
-
-    def security_checkpoint(self, secrets_detected: bool = False,
-                           config_issues: Optional[List[str]] = None) -> Dict[str, any]:
+    def security_checkpoint(
+        self, secrets_detected: bool = False, config_issues: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
         """Run a security checkpoint.
 
         V1: Verify that no secrets are leaked in configuration,
@@ -370,6 +386,7 @@ class HardRiskEngine:
 # ---------------------------------------------------------------------------
 # Reconciliation engine
 
+
 class ReconciliationEngine:
     """Reconcile cash, buying power, positions, orders, and fills.
 
@@ -398,7 +415,7 @@ class ReconciliationEngine:
         # Simple reconciliation using OMS state
         # ending_cash = beginning_cash - commission - slippage + realized_pnl
         # For now, check consistency of OMS cash state
-        if hasattr(self.oms, "orders") and self.orders:
+        if hasattr(self.oms, "orders") and self.oms.orders:
             # Calculate from filled orders
             total_commission = 1.0  # placeholder
             total_slippage = 0.0  # placeholder
@@ -430,9 +447,7 @@ class ReconciliationEngine:
             exp_qty = expected_positions.get(sym, 0)
             act_qty = actual_positions.get(sym, 0)
             if exp_qty != act_qty:
-                mismatches.append(
-                    f"Position {sym}: expected qty={exp_qty}, actual qty={act_qty}"
-                )
+                mismatches.append(f"Position {sym}: expected qty={exp_qty}, actual qty={act_qty}")
 
         if mismatches:
             self.errors.extend(mismatches)
@@ -467,10 +482,11 @@ class ReconciliationEngine:
         V1: Expected fills from signals vs actual fills from execution.
         """
         if expected_fills != actual_fills:
-            self.errors.append(
-                f"Fill count mismatch: expected={expected_fills}, actual={actual_fills}"
+            self.errors.append(f"Fill count mismatch: expected={expected_fills}, actual={actual_fills}")
+            return (
+                False,
+                f"Fill count mismatch: expected={expected_fills}, actual={actual_fills}",
             )
-            return False, f"Fill count mismatch: expected={expected_fills}, actual={actual_fills}"
         return True, f"Fill reconciliation OK: {actual_fills} fills"
 
     # ---- Run full reconciliation ----
@@ -485,15 +501,17 @@ class ReconciliationEngine:
         actual_fills: int,
         oms_orders: Dict[str, Any],
         broker_orders: Dict[str, Any],
-    ) -> Dict[str, any]:
+    ) -> Dict[str, Any]:
         """Run complete reconciliation and return summary.
 
         V1: All checks performed; fail-closed if any critical error.
         """
+        self.errors = []
+        self.warnings = []
         results = {
             "cash_reconciliation": self.reconcile_cash(beginning_cash, expected_ending_cash),
             "position_reconciliation": self.reconcile_positions(expected_positions, actual_positions),
-            "order_reconciliation": self.reconcile_orders(oms_orders, {}),  # broker_orders placeholder
+            "order_reconciliation": self.reconcile_orders(oms_orders, broker_orders),
             "fill_reconciliation": self.reconcile_fills(expected_fills, actual_fills),
         }
 
@@ -517,10 +535,10 @@ class ReconciliationEngine:
         beginning_cash: float,
         current_cash: float,
         positions_snapshot: Dict[str, float],
-        all_orders: Dict[str, dict],
-        all_fills: List[dict],
-        simulation_metrics: Dict[str, any],
-    ) -> Dict[str, any]:
+        all_orders: Dict[str, Dict[str, Any]],
+        all_fills: List[Dict[str, Any]],
+        simulation_metrics: Dict[str, Any],
+    ) -> Dict[str, Any]:
         """Validate a paper trading session against simulation baseline.
 
         V1: Compares paper trading results with simulation assumptions.
@@ -534,7 +552,7 @@ class ReconciliationEngine:
         """
         from datetime import datetime, timezone
 
-        validation_results: Dict[str, any] = {
+        validation_results: Dict[str, Any] = {
             "session_id": session_id,
             "validation_timestamp": datetime.now(timezone.utc).isoformat(),
             "overall_status": "PASS",
@@ -561,9 +579,7 @@ class ReconciliationEngine:
         }
 
         if not cash_ok:
-            msg = (
-                f"Cash reconciliation discrepancy: diff=${cash_diff:.2f}"
-            )
+            msg = f"Cash reconciliation discrepancy: diff=${cash_diff:.2f}"
             validation_results["discrepancies"].append(msg)
             validation_results["overall_status"] = "FAIL"
 
@@ -573,19 +589,24 @@ class ReconciliationEngine:
             for sym, qty in positions_snapshot.items()
         )
         # Compare OMS position market values
-        oms_position_mv = sum(
-            abs(pos.get("market_value", 0.0)) for pos in positions_snapshot.values()
-        ) if isinstance(positions_snapshot, dict) else 0.0
+        # positions_snapshot values may be floats or dicts with market_value key
+        oms_position_mv = (
+            sum(
+                abs(pos.get("market_value", 0.0) if isinstance(pos, dict) else pos)
+                for pos in positions_snapshot.values()
+            )
+            if isinstance(positions_snapshot, dict)
+            else 0.0
+        )
 
-        pos_ok = abs(oms_position_mv - expected_market_value) / max(
-            abs(expected_market_value), 1e-6
-        ) <= 0.05  # 5% tolerance
+        pos_ok = (
+            abs(oms_position_mv - expected_market_value) / max(abs(expected_market_value), 1e-6) <= 0.05
+        )  # 5% tolerance
         validation_results["checks"]["position_consistency"] = {
             "status": "PASS" if pos_ok else "FAIL",
             "oms_market_value": oms_position_mv,
             "expected_market_value": expected_market_value,
-            "deviation_pct": abs(oms_position_mv - expected_market_value)
-            / max(abs(expected_market_value), 1e-6) * 100,
+            "deviation_pct": abs(oms_position_mv - expected_market_value) / max(abs(expected_market_value), 1e-6) * 100,
         }
 
         if not pos_ok:
@@ -617,9 +638,7 @@ class ReconciliationEngine:
         commission_ok = total_commission >= 0
         slippage_ok = total_slippage >= 0
         validation_results["checks"]["cost_attribution"] = {
-            "status": "PASS"
-            if (commission_ok and slippage_ok)
-            else "FAIL",
+            "status": "PASS" if (commission_ok and slippage_ok) else "FAIL",
             "total_commission": total_commission,
             "total_slippage": total_slippage,
             "total_costs": total_costs,
@@ -645,9 +664,7 @@ class ReconciliationEngine:
         }
 
         # 6. Overall status
-        all_checks_pass = all(
-            v["status"] == "PASS" for v in validation_results["checks"].values()
-        )
+        all_checks_pass = all(v["status"] == "PASS" for v in validation_results["checks"].values())
         validation_results["overall_status"] = (
             "PASS" if all_checks_pass and validation_results["overall_status"] == "PASS" else "FAIL"
         )
@@ -655,28 +672,27 @@ class ReconciliationEngine:
         # Log discrepancies if any
         if validation_results["discrepancies"]:
             import logging
+
             logger = logging.getLogger("trading_platform.risk")
             for disc in validation_results["discrepancies"]:
                 logger.warning(f"PAPER VALIDATION [{session_id}]: {disc}")
 
         return validation_results
 
-    def export_validation_state(self) -> dict:
+    def export_validation_state(self) -> Dict[str, Any]:
         """Export the full validation state for backup/restore.
 
         V1: Returns validation history and check results for
         disaster recovery and session replay analysis.
         """
         return {
-            "validation_history": self.validation_history
-            if hasattr(self, "validation_history")
-            else [],
+            "validation_history": self.validation_history if hasattr(self, "validation_history") else [],
             "errors": self.errors,
             "warnings": self.warnings,
             "exported_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    def import_validation_state(self, state: dict) -> None:
+    def import_validation_state(self, state: Dict[str, Any]) -> None:
         """Import validation state from a backup.
 
         V1: Restores validation history and error/warning state.
@@ -685,19 +701,18 @@ class ReconciliationEngine:
         self.errors = state.get("errors", [])
         self.warnings = state.get("warnings", [])
 
-
-# ---- Phase 10: Session comparison utilities ----
+    # ---- Phase 10: Session comparison utilities ----
 
     def compare_session_to_simulation(
-        self, paper_session: dict, simulation_run: dict
-    ) -> dict:
+        self, paper_session: Dict[str, Any], simulation_run: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """Compare a paper trading session to a simulation run.
 
         V1: Returns detailed comparison of key metrics so operators
         can determine if paper trading behaves as expected under the
         deterministic core.
         """
-        comparison: dict = {
+        comparison: Dict[str, Any] = {
             "comparison_timestamp": datetime.now(timezone.utc).isoformat(),
             "paper_session_id": paper_session.get("session_id", "unknown"),
             "simulation_run_id": simulation_run.get("run_id", "unknown"),
@@ -713,17 +728,16 @@ class ReconciliationEngine:
         # Compare expectancy
         paper_expectancy = paper_metrics.get("expectancy", 0.0)
         sim_expectancy = sim_metrics.get("expectancy", 0.0)
-        expectancy_match = abs(paper_expectancy - sim_expectancy) / max(
-            abs(sim_expectancy), 1e-6
-        ) <= 0.1  # 10% tolerance
+        expectancy_match = (
+            abs(paper_expectancy - sim_expectancy) / max(abs(sim_expectancy), 1e-6) <= 0.1
+        )  # 10% tolerance
         comparison["metric_comparisons"].append(
             {
                 "metric": "expectancy",
                 "paper": paper_expectancy,
                 "simulation": sim_expectancy,
                 "match": expectancy_match,
-                "deviation_pct": abs(paper_expectancy - sim_expectancy)
-                / max(abs(sim_expectancy), 1e-6) * 100,
+                "deviation_pct": abs(paper_expectancy - sim_expectancy) / max(abs(sim_expectancy), 1e-6) * 100,
             }
         )
 
@@ -744,17 +758,14 @@ class ReconciliationEngine:
         # Compare turnover
         paper_turnover = paper_metrics.get("turnover", 0.0)
         sim_turnover = sim_metrics.get("turnover", 0.0)
-        turnover_match = abs(paper_turnover - sim_turnover) / max(
-            abs(sim_turnover), 1e-6
-        ) <= 0.1
+        turnover_match = abs(paper_turnover - sim_turnover) / max(abs(sim_turnover), 1e-6) <= 0.1
         comparison["metric_comparisons"].append(
             {
                 "metric": "turnover",
                 "paper": paper_turnover,
                 "simulation": sim_turnover,
                 "match": turnover_match,
-                "deviation_pct": abs(paper_turnover - sim_turnover)
-                / max(abs(sim_turnover), 1e-6) * 100,
+                "deviation_pct": abs(paper_turnover - sim_turnover) / max(abs(sim_turnover), 1e-6) * 100,
             }
         )
 
@@ -773,9 +784,7 @@ class ReconciliationEngine:
         )
 
         # Overall match
-        all_match = all(
-            c.get("match", False) for c in comparison["metric_comparisons"]
-        )
+        all_match = all(c.get("match", False) for c in comparison["metric_comparisons"])
         comparison["overall_match"] = all_match
 
         # Collect discrepancies
@@ -793,7 +802,7 @@ class ReconciliationEngine:
 
     # ---- Phase 7: Backup and restore ----
 
-    def export_state(self) -> dict:
+    def export_state(self) -> Dict[str, Any]:
         """Export the full reconciliation state for backup.
 
         V1: Returns errors, warnings, and reconciliation metadata
@@ -805,7 +814,7 @@ class ReconciliationEngine:
             "exported_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    def import_state(self, state: dict) -> None:
+    def import_state(self, state: Dict[str, Any]) -> None:
         """Import reconciliation state from a backup dict.
 
         V1: Restores errors and warnings from a previous checkpoint.
@@ -813,7 +822,7 @@ class ReconciliationEngine:
         self.errors = state.get("errors", [])
         self.warnings = state.get("warnings", [])
 
-    def take_checkpoint(self) -> dict:
+    def take_checkpoint(self) -> Dict[str, Any]:
         """Take a snapshot/checkpoint of the current reconciliation state.
 
         V1: Convenience wrapper around export_state for session-level
@@ -824,6 +833,7 @@ class ReconciliationEngine:
 
 # ---------------------------------------------------------------------------
 # Session scheduler with fail-closed behavior
+
 
 class SessionScheduler:
     """Session scheduling with fail-closed behavior around market/calendar uncertainty.
@@ -839,7 +849,7 @@ class SessionScheduler:
         self.is_trading_halted = False
         self.startup_reconciliation_done = False
 
-    def startup(self) -> Dict[str, any]:
+    def startup(self) -> Dict[str, Any]:
         """Session startup: run initial reconciliation.
 
         V1: On session start, reconcile cash, positions, orders, and fills.
@@ -849,12 +859,12 @@ class SessionScheduler:
         # come from persistent storage (PostgreSQL + Parquet)
         beginning_cash = 10000.0
         expected_ending_cash = 10000.0  # unchanged if no trades
-        expected_positions = {}
-        actual_positions = {}
+        expected_positions: Dict[str, Any] = {}
+        actual_positions: Dict[str, Any] = {}
         expected_fills = 0
         actual_fills = 0
-        oms_orders = {}
-        broker_orders = {}
+        oms_orders: Dict[str, Any] = {}
+        broker_orders: Dict[str, Any] = {}
 
         # Run reconciliation
         result = self.reconciliation.reconcile_all(
@@ -868,18 +878,18 @@ class SessionScheduler:
             broker_orders,
         )
 
-        if not results["overall_status"] == "PASS":
+        if not result["overall_status"] == "PASS":
             self.is_trading_halted = True
             return {
                 "status": "TRADING_HALTED",
                 "reason": "Startup reconciliation failed",
-                "details": results["errors"],
+                "details": result["errors"],
             }
 
         self.startup_reconciliation_done = True
-        return {"status": "STARTUP_OK", "reconciliation": results}
+        return {"status": "STARTUP_OK", "reconciliation": result}
 
-    def check_market_calendar(self, market_open: bool, calendar_valid: bool) -> Dict[str, any]:
+    def check_market_calendar(self, market_open: bool, calendar_valid: bool) -> Dict[str, Any]:
         """Check market/calendar validity.
 
         V1: If market is closed or calendar data is invalid, fail-closed:
@@ -894,7 +904,7 @@ class SessionScheduler:
         self.is_trading_halted = False
         return {"status": "TRADING_RESUMED", "reason": "Market open, calendar valid"}
 
-    def on_fill_event(self) -> Dict[str, any]:
+    def on_fill_event(self) -> Dict[str, Any]:
         """Trigger reconciliation on fill event.
 
         V1: After each fill, reconcile cash and positions to detect
@@ -914,20 +924,20 @@ class SessionScheduler:
         """
         return not self.is_trading_halted and self.startup_reconciliation_done
 
-# ---- Phase 8: Monitoring and metrics ----
+    # ---- Phase 8: Monitoring and metrics ----
 
-    def metrics_snapshot(self) -> Dict[str, any]:
+    def metrics_snapshot(self) -> Dict[str, Any]:
         """Capture a metrics snapshot of the session state.
 
-        V1: Returns comprehensive metrics for operational monitoring:
-        - Trading status (halted/resumed)
-- Startup reconciliation status
-- Active risk policy
-- Error/warning counts from reconciliation
-- Session uptime
+                V1: Returns comprehensive metrics for operational monitoring:
+                - Trading status (halted/resumed)
+        - Startup reconciliation status
+        - Active risk policy
+        - Error/warning counts from reconciliation
+        - Session uptime
         """
         from datetime import timezone
-        uptime = None
+
         return {
             "trading_halted": self.is_trading_halted,
             "startup_reconciliation_done": self.startup_reconciliation_done,
@@ -950,7 +960,7 @@ class SystemMonitor:
     def __init__(self, session_scheduler: SessionScheduler, heartbeat: DeadManHeartbeat):
         self.session_scheduler = session_scheduler
         self.heartbeat = heartbeat
-        self.metrics_history: List[Dict[str, any]] = []
+        self.metrics_history: List[Dict[str, Any]] = []
         self.signal_count = 0
         self.risk_rejection_count = 0
         self.decision_latencies: List[float] = []
@@ -971,7 +981,7 @@ class SystemMonitor:
         if len(self.decision_latencies) > 1000:
             self.decision_latencies = self.decision_latencies[-1000:]
 
-    def check_data_freshness(self, last_bar_time: datetime, max_age_seconds: float = 3600.0) -> Dict[str, any]:
+    def check_data_freshness(self, last_bar_time: datetime, max_age_seconds: float = 3600.0) -> Dict[str, Any]:
         """Check if the last bar data is fresh enough.
 
         V1: If data is older than max_age_seconds, flag it as stale.
@@ -993,10 +1003,11 @@ class SystemMonitor:
     def _flag_stale_data(self, message: str) -> None:
         """Flag stale data in the monitoring system."""
         import logging
+
         logger = logging.getLogger("trading_platform.monitor")
         logger.warning(f"STALE DATA: {message}")
 
-    def snapshot(self) -> Dict[str, any]:
+    def snapshot(self) -> Dict[str, Any]:
         """Take a complete monitoring snapshot."""
         hb_healthy = self.heartbeat.is_healthy() if self.heartbeat else False
         if not hb_healthy:
@@ -1007,8 +1018,7 @@ class SystemMonitor:
             "signals_recorded": self.signal_count,
             "risk_rejections": self.risk_rejection_count,
             "avg_decision_latency_ms": (
-                sum(self.decision_latencies) / len(self.decision_latencies)
-                if self.decision_latencies else 0.0
+                sum(self.decision_latencies) / len(self.decision_latencies) if self.decision_latencies else 0.0
             ),
             "trading_halted": self.session_scheduler.is_trading_halted,
             "startup_reconciliation_done": self.session_scheduler.startup_reconciliation_done,
@@ -1016,6 +1026,6 @@ class SystemMonitor:
             "decision_latencies_sample": self.decision_latencies[-10:] if self.decision_latencies else [],
         }
 
-    def export_history(self) -> List[Dict[str, any]]:
+    def export_history(self) -> List[Dict[str, Any]]:
         """Export the full metrics history."""
         return self.metrics_history.copy()

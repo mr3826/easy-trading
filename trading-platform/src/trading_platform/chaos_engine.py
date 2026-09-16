@@ -7,11 +7,12 @@ shadow mode — never active in live environments.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple, Any
-import json
-import time
-import random
+from typing import Any, Dict, List, Optional, ParamSpec, TypeVar, cast
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 # ---------------------------------------------------------------------------
 # Failure categories
@@ -52,7 +53,7 @@ class FailureRecord:
         self.success = success
         self.notes = notes
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "failure_type": self.failure_type,
             "injected_at": self.injected_at.isoformat(),
@@ -63,13 +64,9 @@ class FailureRecord:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "FailureRecord":
+    def from_dict(cls, data: Dict[str, Any]) -> "FailureRecord":
         injected = datetime.fromisoformat(data["injected_at"])
-        recovered = (
-            datetime.fromisoformat(data["recovered_at"])
-            if data.get("recovered_at")
-            else None
-        )
+        recovered = datetime.fromisoformat(data["recovered_at"]) if data.get("recovered_at") else None
         return cls(
             failure_type=data["failure_type"],
             injected_at=injected,
@@ -106,11 +103,43 @@ class FailureInjector:
         """Inject the failure."""
         self._active = True
         self.start_time = datetime.now(timezone.utc)
-        self.records.append(FailureRecord(
-            failure_type=self.failure_type,
-            injected_at=self.start_time,
-            duration=self.duration,
-        ))
+        self.records.append(
+            FailureRecord(
+                failure_type=self.failure_type,
+                injected_at=self.start_time,
+                duration=self.duration,
+            )
+        )
+
+    def __enter__(self) -> "FailureInjector":
+        self.start()
+        return self
+
+    def __exit__(self, _exc_type: object, _exc_value: object, _traceback: object) -> None:
+        self.recover()
+
+    def wrap(self, operation: Callable[P, R]) -> Callable[P, R]:
+        """Change dependency behavior while the injection is active."""
+
+        def guarded(*args: P.args, **kwargs: P.kwargs) -> R:
+            if not self._active:
+                return operation(*args, **kwargs)
+            if self.failure_type in {
+                FAILURE_INTERNET_LOSS,
+                FAILURE_DB_LOSS,
+                FAILURE_BROKER_REJECTION,
+            }:
+                raise ConnectionError(f"injected dependency failure: {self.failure_type}")
+            if self.failure_type == FAILURE_PROCESS_KILL:
+                raise RuntimeError("injected process interruption")
+            if self.failure_type == FAILURE_STALE_QUOTE:
+                return cast(R, None)
+            result = operation(*args, **kwargs)
+            if self.failure_type == FAILURE_DUPLICATE_EVENT:
+                operation(*args, **kwargs)
+            return result
+
+        return guarded
 
     def recover(self) -> None:
         """Recover from the injected failure."""
@@ -123,7 +152,7 @@ class FailureInjector:
         """Add a manual record."""
         self.records.append(record)
 
-    def status(self) -> dict:
+    def status(self) -> Dict[str, Any]:
         """Current injection status."""
         return {
             "active": self._active,
@@ -163,16 +192,16 @@ class FailureScenarios:
         return inj
 
     @staticmethod
-    def stale_quote(
-        symbol: str, price_deviation_pct: float = 5.0, duration: float = 3.0
-    ) -> FailureInjector:
+    def stale_quote(symbol: str, price_deviation_pct: float = 5.0, duration: float = 3.0) -> FailureInjector:
         """Simulate a stale quote for ``symbol`` with ``price_deviation_pct`` deviation."""
         inj = FailureInjector(FAILURE_STALE_QUOTE, duration=duration)
-        inj.records.append(FailureRecord(
-            failure_type=FAILURE_STALE_QUOTE,
-            injected_at=datetime.now(timezone.utc),
-            notes=f"Stale quote for {symbol}: price off by {price_deviation_pct}%",
-        ))
+        inj.records.append(
+            FailureRecord(
+                failure_type=FAILURE_STALE_QUOTE,
+                injected_at=datetime.now(timezone.utc),
+                notes=f"Stale quote for {symbol}: price off by {price_deviation_pct}%",
+            )
+        )
         inj.start()
         return inj
 
@@ -184,7 +213,7 @@ class FailureScenarios:
             FailureRecord(
                 failure_type=FAILURE_DUPLICATE_EVENT,
                 injected_at=now,
-                notes=f"Duplicate event injection #{i+1}",
+                notes=f"Duplicate event injection #{i + 1}",
             )
             for i in range(n)
         ]
@@ -311,6 +340,8 @@ class DeadManHeartbeat:
     def is_healthy(self) -> bool:
         """Check if heartbeat is still healthy."""
         if not self._running:
+            return False
+        if self.last_seen is None:
             return False
         age = (datetime.now(timezone.utc) - self.last_seen).total_seconds()
         if age > self.interval * self.failure_threshold:

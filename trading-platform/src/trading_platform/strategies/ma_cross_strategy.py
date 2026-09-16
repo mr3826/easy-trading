@@ -6,16 +6,15 @@ V1 Daily Long-Only Hypothesis:
 - Maximum 3 positions (per ADR V1)
 - Holding period: days to weeks
 - Cash: no leverage, cash account
-- Order type: MARKET at day close (fill assumption CLOSE)
+- Order type: MARKET at the next eligible open
 - Commission: FIXED $1.00 per order
 - Slippage: 0.1% modeled via fill assumption
 """
 
-from datetime import date, datetime
-from typing import Dict, Optional, Tuple
+from datetime import date
+from typing import Any, Dict, List, Optional
 
 import numpy as np
-
 
 # ---------------------------------------------------------------------------
 # Hypothesis configuration (V1 fixed parameters, NOT to be optimized until
@@ -68,11 +67,11 @@ class MaCrossHypothesis:
 
 
 def generate_signal(
-    bars: Dict[str, list],  # symbol -> list of Bar dicts
+    bars: Dict[str, List[Dict[str, Any]]],  # symbol -> list of Bar dicts
     hypothesis: MaCrossHypothesis,
     symbol: str,
     current_date: date,
-) -> Optional[dict]:
+) -> Optional[Dict[str, Any]]:
     """Generate a single daily signal for *symbol*.
 
     V1 rules:
@@ -92,8 +91,6 @@ def generate_signal(
     today_bars = [b for b in bar_list if b["timestamp"].date() == current_date]
     if not today_bars:
         return None
-
-    bar = today_bars[-1]  # use the final bar of the day
 
     # Need enough history for SMA calculation
     # In a full backtest we'd maintain rolling windows; here we simplify:
@@ -128,7 +125,7 @@ def generate_signal(
             "quantity": max(hypothesis.min_shares, 1),
             "order_type": "MARKET",
             "time_in_force": "DAY",
-            "price": None,  # market order → fill at CLOSE
+            "price": None,  # market order -> fill at next eligible event
         }
     return None
 
@@ -137,7 +134,7 @@ def generate_signal(
 # Experiment metadata
 
 
-def hypothesis_to_dict(hypothesis: MaCrossHypothesis) -> dict:
+def hypothesis_to_dict(hypothesis: MaCrossHypothesis) -> Dict[str, Any]:
     """Serialize hypothesis for experiment persistence."""
     return {
         "hypothesis_id": hypothesis.hypothesis_id,
@@ -151,7 +148,7 @@ def hypothesis_to_dict(hypothesis: MaCrossHypothesis) -> dict:
     }
 
 
-def dict_to_hypothesis(d: dict) -> MaCrossHypothesis:
+def dict_to_hypothesis(d: Dict[str, Any]) -> MaCrossHypothesis:
     """Deserialize hypothesis from experiment persistence."""
     return MaCrossHypothesis(
         fast_length=d.get("fast_length", 5),

@@ -15,35 +15,21 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from enum import Enum, auto
-from typing import Dict, Optional, Any
+from typing import Any, Dict, Optional
 
-from trading_platform.domain import Instrument, Order, OrderSide, OrderType, TimeInForce, OrderStatus, OrderIntent
-
+from trading_platform.domain import (
+    Order,
+    OrderSide,
+    OrderStatus,
+)
 
 # ---------------------------------------------------------------------------
 # Order status enum — V1 lifecycle
-
-
-class OrderLifecycle(Enum):
-    """V1 order status lifecycle.
-
-    States:
-    - SUBMITTED: Order sent to broker, awaiting acceptance
-    - ACCEPTED: Broker accepted the order
-    - OPEN: Order is active in the market
-    - FILLED: Order has been filled (all or part)
-    - CANCELED: Order was canceled before fill
-    - REJECTED: Order was rejected by risk or broker
-    - EXPIRED: Order expired through time-in-force
-    """
-    SUBMITTED = auto()
-    ACCEPTED = auto()
-    OPEN = auto()
-    FILLED = auto()
-    CANCELED = auto()
-    REJECTED = auto()
-    EXPIRED = auto()
+#
+# The canonical lifecycle enum now lives in the domain model
+# (``trading_platform.domain.OrderStatus``) so OMS state and orders share one
+# type. ``OrderLifecycle`` is retained as an alias for API compatibility.
+OrderLifecycle = OrderStatus
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +122,7 @@ class OMS:
         # OCA groups: group_id -> OCAGroup
         self.oca_groups: Dict[str, OCAGroup] = {}
         # Order lifecycle events
-        self.event_ledger: list[dict] = []
+        self.event_ledger: list[Dict[str, Any]] = []
         # Timeout tracking: order_id -> deadline
         self.timeouts: Dict[str, datetime] = {}
 
@@ -166,7 +152,10 @@ class OMS:
                     OrderLifecycle.CANCELED,
                     OrderLifecycle.REJECTED,
                 ):
-                    return False, f"Order already {existing_order.status.name} with same idempotency key"
+                    return (
+                        False,
+                        f"Order already {existing_order.status.name} with same idempotency key",
+                    )
                 # If existing order is OPEN, we can replace it
                 if existing_order and existing_order.status == OrderLifecycle.OPEN:
                     return self.replace_order(existing_order.order_id, order, idempotency_key)
@@ -208,6 +197,11 @@ class OMS:
         )
 
         return True, "Order submitted"
+
+    def _order_in_oca_group(self, order: Order, group_id: str) -> bool:
+        """Return whether an order is already registered in an OCA group."""
+        group = self.oca_groups.get(group_id)
+        return group is not None and order.order_id in group.orders
 
     # ---- Order acceptance ----
 
@@ -272,11 +266,11 @@ class OMS:
         if order.status not in (OrderLifecycle.OPEN,):
             return False
 
-        order.fill_quantity = getattr(order, "fill_quantity", 0) + fill_quantity
-        order.fill_price = fill_price  # last fill price (avg if partial)
+        order.filled_quantity = (order.filled_quantity or 0) + fill_quantity
+        order.filled_price = fill_price  # last fill price (avg if partial)
 
         # If fully filled
-        if order.fill_quantity >= order.quantity:
+        if order.filled_quantity >= order.quantity:
             order.status = OrderLifecycle.FILLED
 
             self.event_ledger.append(
@@ -285,8 +279,8 @@ class OMS:
                     "order_id": order_id,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "status": order.status.name,
-                    "fill_quantity": order.fill_quantity,
-                    "fill_price": order.fill_price,
+                    "fill_quantity": order.filled_quantity,
+                    "fill_price": order.filled_price,
                 }
             )
         else:
@@ -297,8 +291,8 @@ class OMS:
                     "order_id": order_id,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "status": order.status.name,
-                    "fill_quantity": order.fill_quantity,
-                    "fill_price": order.fill_price,
+                    "fill_quantity": order.filled_quantity,
+                    "fill_price": order.filled_price,
                 }
             )
         return True
@@ -431,7 +425,7 @@ class OMS:
             return order.status.name
         return None
 
-    def list_orders(self) -> Dict[str, dict]:
+    def list_orders(self) -> Dict[str, Dict[str, Any]]:
         """List all orders with summary state."""
         result = {}
         for oid, order in self.orders.items():
@@ -440,7 +434,7 @@ class OMS:
                 "symbol": order.instrument.symbol,
                 "side": order.side.name,
                 "quantity": order.quantity,
-                "fill_quantity": getattr(order, "fill_quantity", 0),
+                "fill_quantity": (order.filled_quantity or 0),
                 "price": order.price,
             }
         return result
@@ -451,7 +445,7 @@ class OMS:
         """Get OCA group by ID."""
         return self.oca_groups.get(group_id)
 
-    def list_oca_groups(self) -> Dict[str, dict]:
+    def list_oca_groups(self) -> Dict[str, Dict[str, Any]]:
         """List all OCA groups with order summaries."""
         result = {}
         for gid, group in self.oca_groups.items():
@@ -464,7 +458,7 @@ class OMS:
 
     # ---- Event ledger ----
 
-    def get_event_ledger(self) -> list[dict]:
+    def get_event_ledger(self) -> list[Dict[str, Any]]:
         """Get the complete order event ledger."""
         return self.event_ledger
 
@@ -481,25 +475,25 @@ class FakeBroker:
     """Deterministic fake broker for testing OMS without external dependencies.
 
     V1: Models order execution realistically but deterministically.
-    - Orders fill at CLOSE price (configurable fill assumption)
+    - Orders fill at the next eligible open (configurable for safe tests)
     - Commission: FIXED $1.00 per order
     - Slippage: 0.1% default, configurable
     - No network latency, no rejections beyond risk limits
     - Full order state synchronization with OMS
     """
 
-    def __init__(self, oms: OMS, fill_assumption: str = "CLOSE"):
+    def __init__(self, oms: OMS, fill_assumption: str = "NEXT_OPEN"):
         self.oms = oms
         self.fill_assumption = fill_assumption
         self.commission_rate = 1.0  # $1.00 per order (FIXED model)
         self.slippage_pct = 0.001  # 0.1% default
         self.order_counter = 0
 
-    def execute_order(self, order: Order, bar: Any) -> dict:
+    def execute_order(self, order: Order, bar: Any) -> Dict[str, Any]:
         """Execute an order deterministically and sync with OMS.
 
         V1 execution model:
-        - Fill price based on fill_assumption (CLOSE, NEXT_OPEN, MARKET, LIMIT)
+        - Fill price based on fill_assumption (NEXT_OPEN, MARKET, LIMIT)
         - Commission: $1.00 per order
         - Slippage: |fill_price - signal_price| for MARKET orders
         - Sync order state to OMS
@@ -516,17 +510,17 @@ class FakeBroker:
         # Commission
         commission = self.commission_rate
 
-        # Sync with OMS
-        self.oms.fill_order(order_id, actual_qty, fill_price)
-
-        # Transition through OMS lifecycle
-        # SUBMITTED → ACCEPTED → OPEN → FILLED (already called above)
-        # If OMS didn't transition, do it here
+        # Transition through OMS lifecycle before accepting any fill.
         oms_order = self.oms.get_order(order_id)
-        if oms_order and oms_order.status == OrderLifecycle.OPEN:
+        if oms_order and oms_order.status == OrderLifecycle.SUBMITTED:
+            self.oms.accept_order(order_id)
+            oms_order = self.oms.get_order(order_id)
+        if oms_order and oms_order.status == OrderLifecycle.ACCEPTED:
             self.oms.open_order(order_id)
-            if oms_order.fill_quantity >= oms_order.quantity:
-                self.oms.fill_order(order_id, oms_order.quantity, fill_price)
+            oms_order = self.oms.get_order(order_id)
+        if oms_order and oms_order.status == OrderLifecycle.OPEN:
+            self.oms.fill_order(order_id, actual_qty, fill_price)
+            oms_order = self.oms.get_order(order_id)
 
         return {
             "order_id": order_id,
@@ -537,7 +531,7 @@ class FakeBroker:
             "commission": commission,
             "slippage": round(fill_price - (order.price or 0), 2) if order.price else 0,
             "status": oms_order.status.name if oms_order else "UNKNOWN",
-            "fill_quantity": oms_order.fill_quantity if oms_order else 0,
+            "fill_quantity": (oms_order.filled_quantity or 0) if oms_order else 0,
         }
 
     def _calculate_fill_price(self, order: Order, bar: Any) -> float:
@@ -547,10 +541,12 @@ class FakeBroker:
         close_price = getattr(bar, "close", 100.0) if bar else 100.0
 
         if self.fill_assumption == "CLOSE":
-            return close_price
+            raise ValueError("same-bar close fills are prohibited")
         elif self.fill_assumption == "NEXT_OPEN":
-            # Would need next bar - use close as placeholder
-            return close_price
+            open_price = getattr(bar, "open", None)
+            if open_price is None:
+                raise ValueError("next-open fake fills require an open price")
+            return float(open_price)
         elif self.fill_assumption == "MARKET":
             # Market order: close + small slippage
             slippage = close_price * self.slippage_pct
@@ -567,99 +563,3 @@ class FakeBroker:
             if order.status == OrderLifecycle.OPEN:
                 self.oms.cancel_order(oid, reason="BROKER_CANCEL")
         self.oms.clear_event_ledger()
-
-
-# ---------------------------------------------------------------------------
-# Example usage / demo
-
-
-def demo_oms_lifecycle():
-    """Demonstrate OMS state machine lifecycle."""
-
-    print("=" * 60)
-    print("OMS STATE MACHINE DEMO")
-    print("=" * 60)
-
-    # Initialize OMS and fake broker
-    oms = OMS(oms_id="demo_oms")
-    broker = FakeBroker(oms, fill_assumption="CLOSE")
-
-    # Create an instrument and order
-    inst = Instrument(symbol="AAPL")
-    order = Order(
-        order_id="order-001",
-        instrument=inst,
-        side=OrderSide.BUY,
-        quantity=10,
-        price=None,  # market order
-        order_type=OrderType.MARKET,
-        time_in_force=TimeInForce.DAY,
-        status=OrderLifecycle.SUBMITTED,
-        signal=None,
-        risk_decision=None,
-    )
-
-    # 1. Submit order
-    print("\n1. Submit order:")
-    accepted, reason = oms.submit_order(order)
-    print(f"   Accepted: {accepted}, Reason: {reason}")
-    print(f"   Status: {oms.get_order_status(order.order_id)}")
-
-    # 2. Accept order through OMS
-    print("\n2. Accept order:")
-    accepted = oms.accept_order(order.order_id)
-    print(f"   Accepted: {accepted}")
-    print(f"   Status: {oms.get_order_status(order.order_id)}")
-
-    # 3. Execute through fake broker
-    print("\n3. Execute order via fake broker:")
-    # Create a mock bar
-    class MockBar:
-        close = 102.0
-    execution = broker.execute_order(order, MockBar())
-    print(f"   Execution: {execution['status']}")
-    print(f"   Fill quantity: {execution['fill_quantity']}")
-    print(f"   Fill price: ${execution['fill_price']:.2f}")
-    print(f"   Commission: ${execution['commission']:.2f}")
-    print(f"   Status: {oms.get_order_status(order.order_id)}")
-
-    # 4. Try to submit same idempotency key (should be detected)
-    print("\n4. Submit same order with same idempotency key (should be handled):")
-    order2 = Order(
-        order_id="order-002",
-        instrument=inst,
-        side=OrderSide.BUY,
-        quantity=10,
-        price=None,
-        order_type=OrderType.MARKET,
-        time_in_force=TimeInForce.DAY,
-        status=OrderLifecycle.SUBMITTED,
-        signal=None,
-        risk_decision=None,
-    )
-    # Use same order_id for idempotency test
-    accepted2, reason2 = oms.submit_order(order2, idempotency_key="order-001-key")
-    print(f"   Accepted: {accepted2}, Reason: {reason2}")
-
-    # 5. Cancel order
-    print("\n5. Cancel order:")
-    cancelled = oms.cancel_order(order.order_id, reason="DEMO_CANCEL")
-    print(f"   Cancelled: {cancelled}")
-    print(f"   Status: {oms.get_order_status(order.order_id)}")
-
-    # 6. List all orders
-    print("\n6. List all orders:")
-    for oid, summary in oms.list_orders().items():
-        print(f"   {oid}: status={summary['status']}, symbol={summary['symbol']}, qty={summary['quantity']}")
-
-    # 7. Event ledger
-    print("\n7. Event ledger:")
-    for event in oms.get_event_ledger():
-        print(f"   {event}")
-
-    print(f"\n{'=' * 60}")
-    print("OMS lifecycle demo complete.")
-
-
-if __name__ == "__main__":
-    demo_oms_lifecycle()

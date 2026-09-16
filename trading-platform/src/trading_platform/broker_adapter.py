@@ -15,11 +15,11 @@ V1 contract methods:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Protocol, runtime_checkable
+import logging
+from typing import Any, Dict, Optional, Protocol, runtime_checkable
 
-from trading_platform.domain import Instrument, Order, OrderSide, OrderType, TimeInForce, OrderStatus
-from trading_platform.oms.oms import OMS, OrderLifecycle
+from trading_platform.domain import Order, OrderStatus
+from trading_platform.oms.oms import OMS
 
 
 @runtime_checkable
@@ -35,7 +35,7 @@ class BrokerAdapter(Protocol):
     connected: bool
 
     # Order execution
-    def execute_order(self, order: Order, bar: Any) -> dict:
+    def execute_order(self, order: Order, bar: Any) -> Dict[str, Any]:
         """Execute an order and return fill information.
 
         Returns dict with: order_id, symbol, side, quantity,
@@ -48,7 +48,7 @@ class BrokerAdapter(Protocol):
         Returns True if cancellation succeeded.
         """
 
-    def list_orders(self) -> Dict[str, dict]:
+    def list_orders(self) -> Dict[str, Any]:
         """List all open orders with their current state.
 
         Returns dict mapping order_id -> {status, symbol, side, quantity, price}
@@ -93,31 +93,28 @@ class BrokerAdapter(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# Deterministic fake broker (already implemented in oms.py)
+# Real broker adapter boundary
 
 
-# ---------------------------------------------------------------------------
-# Real broker adapter implementations
-
-# Example: InteractiveBrokersBroker implementation
-class InteractiveBrokersBroker(BrokerAdapter):
+class IBKRPaperBrokerAdapter:
     """IBKR broker adapter for paper trading integration.
 
     Implements the BrokerAdapter protocol for Interactive Brokers TWS/Gateway API.
     V1 supports: market orders, limit orders, cancel/replace, OCA groups,
     order status tracking, and basic reconciliation.
 
-    NOTE: This is a skeletal implementation for V1. Full IBKR API integration
-    would require the ib_inspect/ib.client libraries and is beyond V1 scope.
+    This boundary deliberately has no fake-fill behavior. An implementation
+    backed by an approved IBKR paper client must be supplied by deployment
+    configuration and tested only under the external gate.
     """
 
-    broker_id = "IBKR"
-    connected = False
-
     def __init__(self, paper: bool = True):
+        if not paper:
+            raise ValueError("IBKR adapter accepts paper configuration only")
         self._paper = paper
-        self._orders: Dict[str, dict] = {}
+        self._orders: Dict[str, Dict[str, Any]] = {}
         self._error: Optional[str] = None
+        self._connected = False
 
     # --- Broker identity ---
 
@@ -135,45 +132,9 @@ class InteractiveBrokersBroker(BrokerAdapter):
 
     # --- Order execution ---
 
-    def execute_order(self, order: Order, bar: Any) -> dict:
-        """Execute an order via IBKR paper trading.
-
-        V1: Deterministic fill simulation for paper mode.
-        Returns dict with: order_id, symbol, side, quantity,
-        fill_price, commission, slippage, status, fill_quantity
-        """
-        from trading_platform.oms.oms import OMS, FakeBroker
-
-        # Use the deterministic fake broker for fill simulation
-        # Pass a minimal OMS instance
-        oms = OMS(oms_id="ibkr_paper_tmp")
-        fake = FakeBroker(oms, fill_assumption="CLOSE")
-        # Actually, let's simulate more directly without relying on FakeBroker internals:
-        fill_price = bar.close if hasattr(bar, "close") else order.price or 100.0
-        slippage = 0.0  # Paper trading: zero slippage
-        commission = 1.0  # IBKR paper: $1 per order flat
-
-        # Mark order as FILLED in broker state
-        self._orders[order.order_id] = {
-            "status": "FILLED",
-            "symbol": order.instrument.symbol,
-            "side": order.side.value,
-            "quantity": order.quantity,
-            "price": order.price,
-            "fill_price": fill_price,
-        }
-
-        return {
-            "order_id": order.order_id,
-            "symbol": order.instrument.symbol,
-            "side": order.side.value,
-            "quantity": order.quantity,
-            "fill_price": fill_price,
-            "commission": commission,
-            "slippage": slippage,
-            "status": "FILLED",
-            "fill_quantity": order.quantity,
-        }
+    def execute_order(self, order: Order, bar: Any) -> Dict[str, Any]:
+        """Reject until a real, paper-only client is explicitly configured."""
+        raise RuntimeError("IBKR paper client is not configured; submission blocked")
 
     def cancel_order(self, order_id: str, reason: str = "") -> bool:
         """Cancel a specific order via IBKR.
@@ -186,17 +147,13 @@ class InteractiveBrokersBroker(BrokerAdapter):
             return True
         return False
 
-    def list_orders(self) -> Dict[str, dict]:
+    def list_orders(self) -> Dict[str, Any]:
         """List all open orders from IBKR perspective.
 
         V1: Returns dict mapping order_id -> {status, symbol, side, quantity, price}
         """
         # Return only orders that are not yet filled or cancelled
-        return {
-            oid: info
-            for oid, info in self._orders.items()
-            if info["status"] in ("SUBMITTED", "ACCEPTED", "OPEN")
-        }
+        return {oid: info for oid, info in self._orders.items() if info["status"] in ("SUBMITTED", "ACCEPTED", "OPEN")}
 
     def get_order_status(self, order_id: str) -> Optional[str]:
         """Get the status of a specific order from IBKR.
@@ -215,10 +172,8 @@ class InteractiveBrokersBroker(BrokerAdapter):
         V1: Paper mode connects to TWS paper trader.
         Returns True if connection succeeded.
         """
-        self.connected = True
-        self._orders = {}  # Reset order book on connect
-        # In V1, we simulate a successful connect for paper trading
-        return True
+        self._error = "external IBKR paper setup required"
+        return False
 
     def stop(self) -> bool:
         """Stop the IBKR connection.
@@ -235,8 +190,7 @@ class InteractiveBrokersBroker(BrokerAdapter):
         V1: Useful after network interruption.
         Returns True if reconnection succeeded.
         """
-        self.connected = True
-        return True
+        return self.start()
 
     # --- Reconciliation sync ---
 
@@ -251,25 +205,25 @@ class InteractiveBrokersBroker(BrokerAdapter):
             # Check if OMS has this order
             if order_id in oms.orders:
                 # Update OMS order status to match broker
-                oms.orders[order_id]["status"] = broker_info["status"]
+                try:
+                    oms.orders[order_id].status = OrderStatus[broker_info["status"]]
+                except KeyError:
+                    self._error = f"unknown broker status: {broker_info['status']}"
             else:
                 # OMS doesn't know about this order - this is an inconsistency
                 # that should be flagged
-                import logging
                 logger = logging.getLogger("trading_platform.broker_adapter")
-                logger.warning(
-                    f"Broker has order {order_id} but OMS does not"
-                )
+                logger.warning(f"Broker has order {order_id} but OMS does not")
 
         # Also sync OMS orders back to broker state (subset)
         for order_id, oms_order in oms.orders.items():
             if order_id not in self._orders:
                 # Mark as SUBMITTED in broker if not already there
                 self._orders[order_id] = {
-                    "status": oms_order.get("status", "SUBMITTED"),
-                    "symbol": oms_order.get("instrument", {}).get("symbol", "UNKNOWN"),
-                    "side": oms_order.get("side", "BUY"),
-                    "quantity": oms_order.get("quantity", 0),
+                    "status": oms_order.status.name,
+                    "symbol": oms_order.instrument.symbol,
+                    "side": oms_order.side.name,
+                    "quantity": oms_order.quantity,
                 }
 
     def get_last_error(self) -> Optional[str]:
@@ -277,14 +231,59 @@ class InteractiveBrokersBroker(BrokerAdapter):
         return self._error
 
 
+class FakeBrokerAdapter:
+    """Deterministic in-process adapter; it never communicates externally."""
+
+    broker_id = "FAKE"
+
+    def __init__(self, oms: OMS) -> None:
+        from trading_platform.oms.oms import FakeBroker
+
+        self.oms = oms
+        self._broker = FakeBroker(oms, fill_assumption="NEXT_OPEN")
+        self.connected = False
+
+    def start(self) -> bool:
+        self.connected = True
+        return True
+
+    def stop(self) -> bool:
+        self.connected = False
+        return True
+
+    def reconnect(self) -> bool:
+        return self.start()
+
+    def execute_order(self, order: Order, bar: Any) -> Dict[str, Any]:
+        if not self.connected:
+            raise RuntimeError("fake broker is disconnected")
+        return self._broker.execute_order(order, bar)
+
+    def cancel_order(self, order_id: str, reason: str = "") -> bool:
+        return self.oms.cancel_order(order_id, reason)
+
+    def list_orders(self) -> Dict[str, Any]:
+        return self.oms.list_orders()
+
+    def get_order_status(self, order_id: str) -> Optional[str]:
+        return self.oms.get_order_status(order_id)
+
+    def sync_state(self, oms: OMS) -> None:
+        if not self.connected:
+            raise RuntimeError("fake broker is disconnected")
+
+    def get_last_error(self) -> Optional[str]:
+        return None
+
+
 # Example: AlpacaBroker skeleton (placeholder for future V2)
 # class AlpacaBroker(BrokerAdapter):
 #     broker_id = "ALPACA"
 #     connected = False
 #
-#     def execute_order(self, order: Order, bar: Any) -> dict: ...
+#     def execute_order(self, order: Order, bar: Any) -> Dict[str, Any]: ...
 #     def cancel_order(self, order_id: str, reason: str = "") -> bool: ...
-#     def list_orders(self) -> Dict[str, dict]: ...
+#     def list_orders(self) -> Dict[str, Any]: ...
 #     def get_order_status(self, order_id: str) -> Optional[str]: ...
 #     def start(self) -> bool: ...
 #     def stop(self) -> bool: ...
