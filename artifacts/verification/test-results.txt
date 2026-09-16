@@ -1,6 +1,6 @@
-commit=5e611d48d1465b72dd54ed8a4c1a786d4f36eb14
+commit=c65d21e0fa59426250a83d17bcc579580736ccb8
 command=uv run pytest -m "not external" --cov=trading_platform --cov-report=term-missing --cov-report=xml:artifacts/verification/coverage.xml --junitxml=artifacts/verification/test-results.xml
-utc=2026-09-16T20:19:41.530741+00:00
+utc=2026-09-16T20:38:00.396503+00:00
 platform=nt
 python=Python 3.14.3
 uv=uv 0.10.9 (f675560f3 2026-03-06)
@@ -47,4 +47,4 @@ trading-platform\src\trading_platform\walk_forward\walk_forward.py              
 -----------------------------------------------------------------------------------------------------------
 TOTAL                                                                          2879    428    85%
 Coverage XML written to file artifacts/verification/coverage.xml
-74 passed in 40.58s
+74 passed in 59.09s

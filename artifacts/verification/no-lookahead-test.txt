@@ -1,6 +1,6 @@
-commit=5e611d48d1465b72dd54ed8a4c1a786d4f36eb14
+commit=c65d21e0fa59426250a83d17bcc579580736ccb8
 command=uv run pytest trading-platform/tests/unit/test_simulator_safety.py -q
-utc=2026-09-16T20:21:56.814095+00:00
+utc=2026-09-16T20:40:08.469391+00:00
 platform=nt
 python=Python 3.14.3
 uv=uv 0.10.9 (f675560f3 2026-03-06)
