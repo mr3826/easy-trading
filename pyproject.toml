@@ -30,6 +30,7 @@ dev = [
 
 [project.scripts]
 trading-platform = "trading_platform.cli:main"
+dead-man-monitor = "trading_platform.dead_man:main"
 
 [tool.setuptools.packages.find]
 where = ["trading-platform/src"]

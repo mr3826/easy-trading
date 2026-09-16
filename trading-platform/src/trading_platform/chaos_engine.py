@@ -7,8 +7,12 @@ shadow mode — never active in live environments.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, ParamSpec, TypeVar, cast
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 # ---------------------------------------------------------------------------
 # Failure categories
@@ -106,6 +110,36 @@ class FailureInjector:
                 duration=self.duration,
             )
         )
+
+    def __enter__(self) -> "FailureInjector":
+        self.start()
+        return self
+
+    def __exit__(self, _exc_type: object, _exc_value: object, _traceback: object) -> None:
+        self.recover()
+
+    def wrap(self, operation: Callable[P, R]) -> Callable[P, R]:
+        """Change dependency behavior while the injection is active."""
+
+        def guarded(*args: P.args, **kwargs: P.kwargs) -> R:
+            if not self._active:
+                return operation(*args, **kwargs)
+            if self.failure_type in {
+                FAILURE_INTERNET_LOSS,
+                FAILURE_DB_LOSS,
+                FAILURE_BROKER_REJECTION,
+            }:
+                raise ConnectionError(f"injected dependency failure: {self.failure_type}")
+            if self.failure_type == FAILURE_PROCESS_KILL:
+                raise RuntimeError("injected process interruption")
+            if self.failure_type == FAILURE_STALE_QUOTE:
+                return cast(R, None)
+            result = operation(*args, **kwargs)
+            if self.failure_type == FAILURE_DUPLICATE_EVENT:
+                operation(*args, **kwargs)
+            return result
+
+        return guarded
 
     def recover(self) -> None:
         """Recover from the injected failure."""

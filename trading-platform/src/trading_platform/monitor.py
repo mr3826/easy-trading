@@ -8,15 +8,77 @@ to testing/shadow/live-monitor mode.
 
 from __future__ import annotations
 
+import json
 import logging
+import smtplib
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from email.message import EmailMessage
+from typing import Any, Callable, Dict, List, Optional, Protocol
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 # ---------------------------------------------------------------------------
 # Module-level logger
 # ---------------------------------------------------------------------------
 
 logger = logging.getLogger("trading_platform.monitor")
+
+
+class AlertChannel(Protocol):
+    """Independent critical-alert transport."""
+
+    def send(self, message: str) -> None: ...
+
+
+class WebhookAlertChannel:
+    """HTTPS webhook transport; endpoint credentials stay in deployment config."""
+
+    def __init__(self, endpoint: str, timeout_seconds: float = 5.0) -> None:
+        if urlparse(endpoint).scheme != "https":
+            raise ValueError("alert webhooks must use HTTPS")
+        self.endpoint = endpoint
+        self.timeout_seconds = timeout_seconds
+
+    def send(self, message: str) -> None:
+        request = Request(
+            self.endpoint,
+            data=json.dumps({"text": message}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=self.timeout_seconds) as response:
+            if response.status >= 300:
+                raise RuntimeError(f"alert webhook returned HTTP {response.status}")
+
+
+class EmailAlertChannel:
+    """SMTP-over-TLS alert transport with password supplied by a callback."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        sender: str,
+        recipient: str,
+        password: Callable[[], str],
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        self.host = host
+        self.port = port
+        self.sender = sender
+        self.recipient = recipient
+        self.password = password
+        self.timeout_seconds = timeout_seconds
+
+    def send(self, message: str) -> None:
+        email = EmailMessage()
+        email["Subject"] = "Trading platform critical alert"
+        email["From"] = self.sender
+        email["To"] = self.recipient
+        email.set_content(message)
+        with smtplib.SMTP_SSL(self.host, self.port, timeout=self.timeout_seconds) as smtp:
+            smtp.login(self.sender, self.password())
+            smtp.send_message(email)
 
 
 # ---------------------------------------------------------------------------
