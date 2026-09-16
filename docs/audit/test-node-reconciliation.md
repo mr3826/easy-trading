@@ -4,10 +4,10 @@
 
 - Baseline source inventory: `artifacts/verification/test-inventory-before.txt`, generated from `git grep` at starting commit `9b461b5`; 47 exact function nodes.
 - Intermediate explicit inventory: `5353cc1:artifacts/verification/test-inventory-after.txt`; 34 nodes.
-- Current explicit inventory: `artifacts/verification/test-inventory-current.txt` and `test-inventory-after.txt`; 77 collected nodes.
+- Current explicit inventory: `artifacts/verification/test-inventory-current.txt` and `test-inventory-after.txt`; 79 collected nodes.
 - Current collection command: `uv run pytest --collect-only`; exit 0.
 
-The apparent 47→34 decrease was a net count, not deletion of 13 valid tests. The 47 baseline consisted of 24 configured unit tests plus 23 root-level scripts discovered accidentally by recursive fallback. The intermediate 34 consisted of the 24 configured tests plus 10 new safety/migration tests. The 23 root nodes were relocated afterward, and additional safety tests were added; current explicit collection is 77.
+The apparent 47→34 decrease was a net count, not deletion of 13 valid tests. The 47 baseline consisted of 24 configured unit tests plus 23 root-level scripts discovered accidentally by recursive fallback. The intermediate 34 consisted of the 24 configured tests plus 10 new safety/migration tests. The 23 root nodes were relocated afterward, and additional safety tests were added; current explicit collection is 79.
 
 ## Every intermediate missing node
 
