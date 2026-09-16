@@ -21,10 +21,7 @@ COMMANDS = {
         "--cov-report=xml:artifacts/verification/coverage.xml "
         "--junitxml=artifacts/verification/test-results.xml"
     ),
-    "coverage-summary.md": (
-        'uv run pytest -m "not external" --cov=trading_platform '
-        "--cov-report=term-missing --cov-report=xml:artifacts/verification/coverage.xml"
-    ),
+    "coverage-summary.md": ("uv run coverage report --show-missing"),
     "secret-scan.txt": "uv run python scripts/secret_scan.py",
     "migration-test.txt": "uv run pytest trading-platform/tests/integration/test_postgres_store.py -m postgres -q",
     "no-lookahead-test.txt": "uv run pytest trading-platform/tests/unit/test_simulator_safety.py -q",
