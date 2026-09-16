@@ -1,6 +1,6 @@
-commit=c65d21e0fa59426250a83d17bcc579580736ccb8
+commit=8b4bc911015da9a4691e02fd91e847664037d1f3
 command=uv run coverage report --show-missing
-utc=2026-09-16T20:39:27.569701+00:00
+utc=2026-09-16T21:09:01.534963+00:00
 platform=nt
 python=Python 3.14.3
 uv=uv 0.10.9 (f675560f3 2026-03-06)
