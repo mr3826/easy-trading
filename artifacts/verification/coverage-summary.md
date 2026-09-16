@@ -1,6 +1,6 @@
-commit=e2f8e93fbfdbc0d73c7873539ed2b04b5f18ec07
+commit=5e611d48d1465b72dd54ed8a4c1a786d4f36eb14
 command=uv run coverage report --show-missing
-utc=2026-09-16T18:43:05.789707+00:00
+utc=2026-09-16T20:20:47.217866+00:00
 platform=nt
 python=Python 3.14.3
 uv=uv 0.10.9 (f675560f3 2026-03-06)
@@ -21,7 +21,7 @@ trading-platform\src\trading_platform\data\ingestion\daily_bar_ingestion.py     
 trading-platform\src\trading_platform\dead_man.py                                21      8    62%   16, 22-28, 32
 trading-platform\src\trading_platform\domain\__init__.py                        207     10    95%   26, 33, 59, 61, 115, 155, 157, 207, 259, 264
 trading-platform\src\trading_platform\features\__init__.py                       38      1    97%   56
-trading-platform\src\trading_platform\ml_pipeline.py                             99      8    92%   26, 30, 77, 83, 87, 90, 136-137
+trading-platform\src\trading_platform\ml_pipeline.py                            101      8    92%   26, 30, 77, 85, 89, 92, 138-139
 trading-platform\src\trading_platform\ml_ranking.py                             196     39    80%   59-61, 64, 83-85, 235, 237, 239, 241, 261-267, 309, 326-327, 344-345, 363-364, 374-375, 378-379, 383-390, 435, 460-465, 485
 trading-platform\src\trading_platform\monitor.py                                169     22    87%   51, 138, 171-175, 180, 240-244, 250, 269-270, 316, 357-359, 364-366, 381, 388, 392, 396, 499
 trading-platform\src\trading_platform\observability\__init__.py                  14      1    93%   22
@@ -40,4 +40,4 @@ trading-platform\src\trading_platform\simulator\event_driven_simulator.py       
 trading-platform\src\trading_platform\strategies\ma_cross_strategy.py            40      7    82%   58, 87, 93, 99, 104, 110, 130
 trading-platform\src\trading_platform\walk_forward\walk_forward.py              183     40    78%   87, 130, 226-236, 245-255, 263-273, 322-326, 338-340, 355-367, 398
 -----------------------------------------------------------------------------------------------------------
-TOTAL                                                                          2877    428    85%
+TOTAL                                                                          2879    428    85%

@@ -1,6 +1,6 @@
-commit=e2f8e93fbfdbc0d73c7873539ed2b04b5f18ec07
+commit=5e611d48d1465b72dd54ed8a4c1a786d4f36eb14
 command=uv run pytest --collect-only
-utc=2026-09-16T18:41:54.392339+00:00
+utc=2026-09-16T20:17:39.639278+00:00
 environment=nt
 Explicit collection command:
 exit_code=0
@@ -23,11 +23,6 @@ trading-platform/tests/integration/test_walk_forward_periods.py::test_walk_forwa
 trading-platform/tests/integration/test_walk_forward_periods.py::test_get_test_period
 trading-platform/tests/integration/test_walk_forward_periods.py::test_hypothesis
 trading-platform/tests/integration/test_walk_forward_periods.py::test_dataset_hash
-trading-platform/tests/integration/test_walk_forward_periods_retried.py::test_period_split_creation
-trading-platform/tests/integration/test_walk_forward_periods_retried.py::test_walk_forward_folds
-trading-platform/tests/integration/test_walk_forward_periods_retried.py::test_get_test_period
-trading-platform/tests/integration/test_walk_forward_periods_retried.py::test_hypothesis
-trading-platform/tests/integration/test_walk_forward_periods_retried.py::test_dataset_hash
 trading-platform/tests/unit/domain/test_domain.py::test_invalid_nan_price_rejection
 trading-platform/tests/unit/domain/test_domain.py::test_invalid_negative_quantity_rejection
 trading-platform/tests/unit/domain/test_domain.py::test_invalid_zero_quantity_rejection
@@ -84,4 +79,4 @@ trading-platform/tests/unit/test_safety_boundaries.py::test_default_config_canno
 trading-platform/tests/unit/test_simulator_safety.py::test_completed_close_signal_fills_only_at_next_open
 trading-platform/tests/unit/test_simulator_safety.py::test_limit_and_stop_orders_require_bar_eligibility
 
-79 tests collected in 2.88s
+74 tests collected in 4.01s
