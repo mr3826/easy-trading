@@ -1,7 +1,7 @@
 # Worktree Ownership Classification
 
 **Recorded:** 2026-09-16, continuation session.
-**Backup patches:** `artifacts/verification/p0-full-diff.patch` (full binary-capable diff), `p0-git-status.txt`, `p0-diff-names.txt`, `p0-diff-stat.txt`, `p0-untracked.txt`, `p0-staged.patch`.
+**Backup patches:** `C:\Users\ahmee\AppData\Local\Temp\kilo\easy-trading-p0-full-diff-current.patch` and `easy-trading-p0-full-diff.patch` (full binary-capable diffs; SHA-256 recorded in the execution log). Inventory records remain in `artifacts/verification/p0-git-status.txt`, `p0-diff-names.txt`, `p0-diff-stat.txt`, and `p0-untracked.txt`.
 
 ## Classification basis
 
@@ -22,7 +22,7 @@ Baseline `git status` was captured before this continuation. Files that were cle
 
 ## MIXED — blocker-tagged: pre-existing user/agent changes interleaved with this session
 
-These files were already modified (uncommitted) at session start and were subsequently edited here. They cannot be separated without reconstructing two histories from the backup patch. They are committed in a dedicated commit whose message names the mixed authorship, with the pre-conflict state preserved in `p0-full-diff.patch`:
+These files were already modified (uncommitted) at session start and were subsequently edited here. They cannot be separated without reconstructing two histories from the backup patch. They are committed in a dedicated commit whose message names the mixed authorship, with the pre-conflict state preserved outside the repository:
 
 - `trading-platform/src/trading_platform/` : `__init__.py`, `broker_adapter.py`, `chaos_engine.py`, `ml_ranking.py`, `monitor.py`, `data/__init__.py`, `data/ingestion/__init__.py`, `data/ingestion/daily_bar_ingestion.py`, `domain/__init__.py`, `oms/oms.py`, `persistence/baseline_report.py`, `persistence/experiment.py`, `risk/__init__.py`, `risk/limits.py`, `risk/risk_engine.py`, `simulator/event_driven_simulator.py`, `strategies/ma_cross_strategy.py`, `walk_forward/walk_forward.py`
 - `trading-platform/tests/unit/domain/test_domain.py`, `trading-platform/tests/unit/simulator/test_simulator.py`
@@ -33,4 +33,4 @@ These files were already modified (uncommitted) at session start and were subseq
 - root: `debug_*.py`, `phase*_test.py`, `phase*_demo.py`, `phase6_integration_test.py`, `temp_check.py`, `test_phase4.py`, `test_wf.py`, `test_wf2.py`
 - untracked scratch: `analyze_*.py`, `fix_*.py`, `show_*.py`, `count_errors.py`, `check_ruff.py`, `extract_errors.py`, `mypy_*.txt`, `ruff_*.txt`
 
-Decision: tracked debris committed in its pre-final state as-is (no content removal); untracked scratch left untracked and excluded from lint collection.
+Decision: tracked debris committed in its pre-final state as-is (no content removal); untracked scratch left untracked and excluded from lint collection. Full patch backups are deliberately outside the public repository.
