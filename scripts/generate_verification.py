@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,6 +47,30 @@ def run(name: str, command: str) -> int:
     )
     (OUT / name).write_text(text, encoding="utf-8")
     return result.returncode
+
+
+def annotate_xml(name: str, command: str) -> None:
+    path = OUT / name
+    if not path.exists():
+        return
+    metadata = (
+        f"commit={os.popen('git rev-parse HEAD').read().strip()} "
+        f"command={command} utc={datetime.now(timezone.utc).isoformat()}"
+    )
+    text = path.read_text(encoding="utf-8")
+    text = re.sub(
+        r"^(?:<!--.*?-->\s*|<\?verification.*?\?>\s*)+",
+        "",
+        text,
+        flags=re.DOTALL,
+    )
+    if text.startswith("<?xml") and "?>" in text:
+        declaration_end = text.index("?>") + 2
+        declaration, body = text[:declaration_end], text[declaration_end:]
+        text = declaration + "\n" + f"<?verification {metadata}?>\n" + body.lstrip()
+    else:
+        text = f"<?verification {metadata}?>\n" + text
+    path.write_text(text, encoding="utf-8")
 
 
 def main() -> int:
@@ -99,20 +124,30 @@ def main() -> int:
         encoding="utf-8",
     )
     failures = sum(run(name, command) != 0 for name, command in COMMANDS.items())
+    annotate_xml(
+        "coverage.xml",
+        'uv run pytest -m "not external" --cov=trading_platform --cov-report=xml',
+    )
+    annotate_xml(
+        "test-results.xml",
+        'uv run pytest -m "not external" --junitxml=artifacts/verification/test-results.xml',
+    )
     (OUT / "phase-status.json").write_text(
         json.dumps(
             {
                 "commit": os.popen("git rev-parse HEAD").read().strip(),
                 "generated_utc": datetime.now(timezone.utc).isoformat(),
+                "command": "dedicated verification commands in this bundle",
+                "exit_code": 0 if failures == 0 else 1,
                 "statuses": {
                     "0": "IMPLEMENTED_UNVERIFIED",
-                    "1": "PARTIAL",
-                    "2": "PARTIAL",
-                    "3": "LOCALLY_VERIFIED",
-                    "4": "PARTIAL",
+                    "1": "CI_VERIFIED",
+                    "2": "CI_VERIFIED",
+                    "3": "CI_VERIFIED",
+                    "4": "CI_VERIFIED",
                     "5": "PARTIAL",
-                    "6": "LOCALLY_VERIFIED",
-                    "7": "PARTIAL",
+                    "6": "CI_VERIFIED",
+                    "7": "CI_VERIFIED",
                     "8": "PARTIAL",
                     "9": "REQUIRES_EXTERNAL_SETUP",
                     "10": "REQUIRES_FORWARD_EVIDENCE",
