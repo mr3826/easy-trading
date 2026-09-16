@@ -141,8 +141,8 @@ def main() -> int:
                 "exit_code": 0 if failures == 0 else 1,
                 "statuses": {
                     "0": "IMPLEMENTED_UNVERIFIED",
-                    "1": "CI_VERIFIED",
-                    "2": "CI_VERIFIED",
+                    "1": "PARTIAL",
+                    "2": "PARTIAL",
                     "3": "CI_VERIFIED",
                     "4": "CI_VERIFIED",
                     "5": "PARTIAL",

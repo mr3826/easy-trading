@@ -7,8 +7,8 @@ external connectivity, forward validation, or strategy profitability.
 | Phase | Status | Source implementation | Meaningful tests and command | Evidence |
 |---:|---|---|---|---|
 | 0 | `IMPLEMENTED_UNVERIFIED` | `docs/product-charter.md`, `docs/risk-policy.md`, `docs/decisions/`, original phase plan | Documentation review; `uv run python scripts/generate_verification.py` | `artifacts/verification/verification-summary.md`; operational approval is external |
-| 1 | `CI_VERIFIED` | `trading-platform/src/trading_platform/domain/__init__.py` | `tests/unit/domain/test_domain.py`; `uv run pytest -m "not external"` | `artifacts/verification/test-results.xml`; source commit recorded in summary |
-| 2 | `CI_VERIFIED` | `data/__init__.py`, `data/ingestion/daily_bar_ingestion.py` | `test_operational_depth.py::test_data_validation_and_ingestion`; same suite command | Coverage XML and test results; real vendor operation remains external |
+| 1 | `PARTIAL` | `trading-platform/src/trading_platform/domain/__init__.py` | `tests/unit/domain/test_domain.py`; `uv run pytest -m "not external"` | Validation tests pass, but complete domain event immutability and invariant coverage remain incomplete |
+| 2 | `PARTIAL` | `data/__init__.py`, `data/ingestion/daily_bar_ingestion.py` | `test_operational_depth.py::test_data_validation_and_ingestion`; same suite command | Validation and local Parquet tests pass; durable archive/revision integration and real vendor operation remain unproven |
 | 3 | `CI_VERIFIED` | `simulator/event_driven_simulator.py` | `test_simulator_safety.py`; `uv run pytest -m "not external"` | `no-lookahead-test.txt`, coverage XML, CI run |
 | 4 | `CI_VERIFIED` | `strategies/ma_cross_strategy.py`, `persistence/baseline_report.py`, `persistence/experiment.py` | `test_phase4.py`, operational depth report tests | `test-results.xml`, `coverage-summary.md`; no profitability claim |
 | 5 | `PARTIAL` | `walk_forward/walk_forward.py`, ML evaluation modules | walk-forward period tests and deterministic ML tests | Offline code is tested; robustness and multiple-testing evidence remain incomplete |
