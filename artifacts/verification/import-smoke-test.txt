@@ -1,0 +1,24 @@
+commit=9b461b5c454ccdd99b543a05ecc2c8c7691120eb
+command=uv run python scripts/import_smoke.py
+utc=2026-09-16T02:02:58.782205+00:00
+platform=nt
+exit_code=0
+
+trading_platform.authorization
+trading_platform.backup
+trading_platform.broker_adapter
+trading_platform.chaos_engine
+trading_platform.config
+trading_platform.data.ingestion.daily_bar_ingestion
+trading_platform.ml_ranking
+trading_platform.monitor
+trading_platform.oms.oms
+trading_platform.persistence.baseline_report
+trading_platform.persistence.experiment
+trading_platform.risk.limits
+trading_platform.risk.risk_engine
+trading_platform.risk__init__
+trading_platform.shadow
+trading_platform.simulator.event_driven_simulator
+trading_platform.strategies.ma_cross_strategy
+trading_platform.walk_forward.walk_forward

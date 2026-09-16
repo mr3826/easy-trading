@@ -1,0 +1,5 @@
+trading-platform/tests/unit/domain/test_domain.py: 18
+trading-platform/tests/unit/simulator/test_simulator.py: 6
+trading-platform/tests/unit/test_migrations_and_imports.py: 3
+trading-platform/tests/unit/test_safety_boundaries.py: 7
+

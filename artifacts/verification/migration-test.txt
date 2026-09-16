@@ -1,0 +1,9 @@
+commit=9b461b5c454ccdd99b543a05ecc2c8c7691120eb
+command=uv run pytest -m 'not external' -q
+utc=2026-09-16T02:03:06.546078+00:00
+platform=nt
+exit_code=4
+
+
+ERROR: file or directory not found: external'
+

@@ -1,0 +1,41 @@
+commit=9b461b5c454ccdd99b543a05ecc2c8c7691120eb
+command=uv run pytest -m "not external" --cov=trading_platform --cov-report=term-missing --cov-report=xml:artifacts/verification/coverage.xml --junitxml=artifacts/verification/test-results.xml
+utc=2026-09-16T02:03:00.314272+00:00
+platform=nt
+exit_code=0
+
+..................................                                       [100%]
+=============================== tests coverage ================================
+_______________ coverage: platform win32, python 3.14.3-final-0 _______________
+
+Name                                                                          Stmts   Miss  Cover   Missing
+-----------------------------------------------------------------------------------------------------------
+trading-platform\src\trading_platform\__init__.py                                 0      0   100%
+trading-platform\src\trading_platform\authorization.py                           29      2    93%   34, 56
+trading-platform\src\trading_platform\backup.py                                   7      0   100%
+trading-platform\src\trading_platform\broker_adapter.py                          65     65     0%   16-228
+trading-platform\src\trading_platform\chaos_engine.py                           151    151     0%   8-333
+trading-platform\src\trading_platform\cli\__init__.py                            10     10     0%   3-20
+trading-platform\src\trading_platform\config.py                                  15      0   100%
+trading-platform\src\trading_platform\data\__init__.py                          101    101     0%   1-251
+trading-platform\src\trading_platform\data\ingestion\__init__.py                  2      2     0%   1-11
+trading-platform\src\trading_platform\data\ingestion\daily_bar_ingestion.py      78     78     0%   1-217
+trading-platform\src\trading_platform\domain\__init__.py                        174      5    97%   26-28, 174, 223
+trading-platform\src\trading_platform\features\__init__.py                       38     11    71%   17, 47-56
+trading-platform\src\trading_platform\ml_ranking.py                             172    172     0%   8-454
+trading-platform\src\trading_platform\monitor.py                                140    140     0%   9-489
+trading-platform\src\trading_platform\observability\__init__.py                  14      1    93%   22
+trading-platform\src\trading_platform\persistence\__init__.py                     0      0   100%
+trading-platform\src\trading_platform\persistence\baseline_report.py            160    160     0%   16-392
+trading-platform\src\trading_platform\persistence\experiment.py                 112    112     0%   15-260
+trading-platform\src\trading_platform\reconciliation\__init__.py                 12      0   100%
+trading-platform\src\trading_platform\risk\__init__.py                            0      0   100%
+trading-platform\src\trading_platform\risk\limits.py                             73     73     0%   14-223
+trading-platform\src\trading_platform\risk\risk_engine.py                       339    339     0%   22-1003
+trading-platform\src\trading_platform\risk__init__.py                             0      0   100%
+trading-platform\src\trading_platform\shadow.py                                  23      0   100%
+trading-platform\src\trading_platform\simulator\event_driven_simulator.py       234     26    89%   108, 338, 405, 441, 454-455, 500, 505-517, 538-539, 552-556, 622, 626, 630, 634, 638
+-----------------------------------------------------------------------------------------------------------
+TOTAL                                                                          1949   1448    26%
+Coverage XML written to file artifacts/verification/coverage.xml
+34 passed in 1.43s

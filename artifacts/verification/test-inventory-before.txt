@@ -1,0 +1,45 @@
+Historical baseline collection command:
+phase6_integration_test.py: 7
+test_phase4.py: 6
+test_wf.py: 5
+test_wf2.py: 5
+
+=================================== ERRORS ====================================
+_______________________ ERROR collecting phase5_demo.py _______________________
+phase5_demo.py:55: in <module>
+    sig = generate_signal({"AAPL": train_bars}, hypothesis, "AAPL", bar_date)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+trading-platform\src\trading_platform\strategies\ma_cross_strategy.py:91: in generate_signal
+    today_bars = [b for b in bar_list if b["timestamp"].date() == current_date]
+                                         ^^^^^^^^^^^^^^
+E   TypeError: string indices must be integers, not 'str'
+------------------------------- Captured stdout -------------------------------
+============================================================
+PHASE 5: WALK-FORWARD VALIDATION - FIRST FOLD DEMO
+============================================================
+
+Hypothesis: ma_cross_5_20
+  Fast SMA: 5, Slow SMA: 20
+_______________________ ERROR collecting phase6_demo.py _______________________
+phase6_demo.py:31: in <module>
+    order = Order(
+E   TypeError: Order.__init__() missing 2 required positional arguments: 'status' and 'signal'
+------------------------------- Captured stdout -------------------------------
+============================================================
+PHASE 6: PRODUCTION OMS STATE MACHINE DEMO
+============================================================
+_______________________ ERROR collecting phase9_test.py _______________________
+ImportError while importing test module 'D:\hexabyte_technologies\easy-trading\phase9_test.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+C:\Users\ahmee\AppData\Roaming\uv\python\cpython-3.14-windows-x86_64-none\Lib\importlib\__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+phase9_test.py:7: in <module>
+    from trading_platform.broker_adapter import InteractiveBrokersBroker, BrokerAdapter
+E   ImportError: cannot import name 'InteractiveBrokersBroker' from 'trading_platform.broker_adapter' (D:\hexabyte_technologies\easy-trading\trading-platform\src\trading_platform\broker_adapter.py)
+=========================== short test summary info ===========================
+ERROR phase5_demo.py - TypeError: string indices must be integers, not 'str'
+ERROR phase6_demo.py - TypeError: Order.__init__() missing 2 required positio...
+ERROR phase9_test.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 3 errors during collection !!!!!!!!!!!!!!!!!!!

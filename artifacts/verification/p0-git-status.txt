@@ -1,0 +1,103 @@
+ M .github/workflows/ci.yml
+ M debug_execute.py
+ M debug_full_sell.py
+ M debug_index.py
+ M debug_sell.py
+ M debug_sell2.py
+ M docs/experiment-registry-schema.md
+ M phase10_test.py
+ M phase5_demo.py
+ M phase6_demo.py
+ M phase6_integration_test.py
+ M phase7_test.py
+ M phase8_test.py
+ M phase9_test.py
+ M pyproject.toml
+ M temp_check.py
+ M test_phase4.py
+ M test_wf.py
+ M test_wf2.py
+ M trading-platform/src/trading_platform/__init__.py
+ M trading-platform/src/trading_platform/broker_adapter.py
+ M trading-platform/src/trading_platform/chaos_engine.py
+ M trading-platform/src/trading_platform/data/__init__.py
+ M trading-platform/src/trading_platform/data/ingestion/__init__.py
+ M trading-platform/src/trading_platform/data/ingestion/daily_bar_ingestion.py
+ M trading-platform/src/trading_platform/domain/__init__.py
+ M trading-platform/src/trading_platform/ml_ranking.py
+ M trading-platform/src/trading_platform/monitor.py
+ M trading-platform/src/trading_platform/oms/oms.py
+ M trading-platform/src/trading_platform/persistence/baseline_report.py
+ M trading-platform/src/trading_platform/persistence/experiment.py
+ M trading-platform/src/trading_platform/risk/__init__.py
+ M trading-platform/src/trading_platform/risk/limits.py
+ M trading-platform/src/trading_platform/risk/risk_engine.py
+ M trading-platform/src/trading_platform/simulator/event_driven_simulator.py
+ M trading-platform/src/trading_platform/strategies/ma_cross_strategy.py
+ M trading-platform/src/trading_platform/walk_forward/walk_forward.py
+ M trading-platform/tests/unit/domain/test_domain.py
+ M trading-platform/tests/unit/simulator/test_simulator.py
+ M uv.lock
+ D walk_forward_first_fold.py
+?? .coverage
+?? .kilo/
+?? analyze_errors.py
+?? analyze_new.py
+?? artifacts/
+?? check_ruff.py
+?? count_errors.py
+?? docs/audit/
+?? docs/plans/
+?? extract_errors.py
+?? find_any.py
+?? fix_any.py
+?? fix_baseline.py
+?? fix_broker_dict.py
+?? fix_broker_dict2.py
+?? fix_dict.py
+?? fix_dict_any.py
+?? fix_dict_args.py
+?? fix_oms.py
+?? fix_specific_dict.py
+?? mypy_full.txt
+?? mypy_new.txt
+?? mypy_new10.txt
+?? mypy_new11.txt
+?? mypy_new12.txt
+?? mypy_new13.txt
+?? mypy_new14.txt
+?? mypy_new15.txt
+?? mypy_new2.txt
+?? mypy_new3.txt
+?? mypy_new4.txt
+?? mypy_new5.txt
+?? mypy_new6.txt
+?? mypy_new7.txt
+?? mypy_new8.txt
+?? mypy_new9.txt
+?? mypy_output.txt
+?? mypy_src.txt
+?? mypy_src2.txt
+?? mypy_src3.txt
+?? ruff_check.txt
+?? ruff_help.txt
+?? ruff_output.txt
+?? ruff_output2.txt
+?? ruff_output3.txt
+?? ruff_output4.txt
+?? ruff_output5.txt
+?? ruff_output6.txt
+?? scripts/
+?? show_dict_errors.py
+?? show_incompatible.py
+?? trading-platform/migrations/
+?? trading-platform/src/trading_platform/authorization.py
+?? trading-platform/src/trading_platform/backup.py
+?? trading-platform/src/trading_platform/cli/
+?? trading-platform/src/trading_platform/config.py
+?? trading-platform/src/trading_platform/features/
+?? trading-platform/src/trading_platform/observability/
+?? trading-platform/src/trading_platform/reconciliation/
+?? trading-platform/src/trading_platform/shadow.py
+?? trading-platform/tests/unit/test_migrations_and_imports.py
+?? trading-platform/tests/unit/test_safety_boundaries.py
