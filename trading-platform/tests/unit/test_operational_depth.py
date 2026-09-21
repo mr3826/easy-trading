@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -28,8 +30,10 @@ from trading_platform.data import (
 )
 from trading_platform.data.ingestion.daily_bar_ingestion import (
     DailyBarIngestion,
+    apply_dividend_adjustment,
     apply_split_adjustment,
     load_parquet_data,
+    read_raw_archive,
 )
 from trading_platform.dead_man import heartbeat_is_fresh
 from trading_platform.domain import (
@@ -143,16 +147,81 @@ def test_data_validation_and_ingestion(tmp_path: Path) -> None:
     result = ingestion.ingest_symbol("AAPL", first.timestamp, second.timestamp)
     assert result.success and len(result.bars) == 2
     assert not ingestion.ingest_symbol("MSFT", first.timestamp, second.timestamp).success
-    assert not ParquetMarketDataProvider(tmp_path).has_bars(Instrument("AAPL"), first.timestamp, second.timestamp)
+
+    parquet = ParquetMarketDataProvider(tmp_path)
+    assert not parquet.has_bars(Instrument("AAPL"), first.timestamp, second.timestamp)
+    with pytest.raises(ValueError):
+        parquet.write_bars([], source="unit-test", schema_version="v1", dataset_version="v1")
+    parquet.write_bars(
+        [first, second], source="unit-test", schema_version="v1", dataset_version="v1", available_at=second.timestamp
+    )
+    assert parquet.has_bars(Instrument("AAPL"), first.timestamp, second.timestamp)
+    assert len(parquet.get_bars(Instrument("AAPL"), first.timestamp, second.timestamp)) == 2
+    assert parquet.get_bars(Instrument("AAPL"), first.timestamp, second.timestamp, as_of=first.timestamp) == []
+    assert len(parquet.get_bars(Instrument("AAPL"), first.timestamp, second.timestamp, as_of=second.timestamp)) == 2
+    metadata = parquet.get_metadata(Instrument("AAPL"))
+    assert (
+        metadata.checksum
+        == hashlib.sha256(max(parquet._parquet_files("AAPL"), key=lambda path: path.name).read_bytes()).hexdigest()
+    )
+    assert parquet.get_metadata(Instrument("AAPL")) == metadata
+    with pytest.raises(ValueError):
+        parquet.write_bars([first], source="unit-test", schema_version="v1", dataset_version="v1")
+    revised = Bar(
+        Instrument("AAPL"), first.timestamp, first.open, first.high, first.low, first.close + 0.5, first.volume
+    )
+    parquet.write_bars(
+        [revised], source="unit-test", schema_version="v1", dataset_version="v2", available_at=second.timestamp
+    )
+    bars = parquet.get_bars(Instrument("AAPL"), first.timestamp, second.timestamp, as_of=second.timestamp)
+    assert [bar.close for bar in bars] == [revised.close, second.close]
+    superseded = parquet.get_superseded(Instrument("AAPL"), first.timestamp, second.timestamp, as_of=second.timestamp)
+    assert [bar.close for bar in superseded] == [first.close]
+
+    archival = DailyBarIngestion(parquet, raw_archive_dir=tmp_path / "raw")
+    archival.set_engineering_universe({Instrument("AAPL")})
+    archived_result = archival.ingest_symbol("AAPL", first.timestamp, second.timestamp, as_of=second.timestamp)
+    assert archived_result.success and archived_result.raw_archive_path is not None
+    assert archived_result.raw_archive_path.is_relative_to(tmp_path / "raw")
+    raw_records = read_raw_archive(tmp_path / "raw", "AAPL")
+    assert len(raw_records) == 2
+    assert {record["checksum"] for record in raw_records} == {
+        hashlib.sha256(
+            json.dumps(
+                {
+                    "symbol": "AAPL",
+                    "timestamp": bar.timestamp.isoformat(),
+                    "open": bar.open,
+                    "high": bar.high,
+                    "low": bar.low,
+                    "close": bar.close,
+                    "volume": bar.volume,
+                },
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        for bar in archived_result.bars
+    }
+    assert all(
+        record["retrieval_timestamp"] == parquet.get_metadata(Instrument("AAPL")).retrieval_timestamp.isoformat()
+        for record in raw_records
+    )
+    assert all(record["source"] == "unit-test" for record in raw_records)
 
     frame = pd.DataFrame([{"timestamp": "2026-01-01", "open": 10, "high": 12, "low": 9, "close": 11, "volume": 100}])
     frame.to_parquet(tmp_path / "AAPL.parquet")
     loaded = load_parquet_data(tmp_path, "AAPL")
     assert str(loaded["timestamp"].dt.tz) == "UTC"
-    split = DataCorporateAction(Instrument("AAPL"), CorporateActionType.SPLIT, first.timestamp, ratio=2.0)
-    adjusted = apply_split_adjustment([first], [split], second.timestamp)
+    split = DataCorporateAction(Instrument("AAPL"), CorporateActionType.SPLIT, second.timestamp, ratio=2.0)
+    adjusted = apply_split_adjustment([first, second], [split], second.timestamp)
     assert adjusted[0].close == first.close / 2
+    assert adjusted[1].close == second.close
     assert apply_split_adjustment([first], [], second.timestamp) == [first]
+    dividend = DataCorporateAction(Instrument("AAPL"), CorporateActionType.DIVIDEND, second.timestamp, cash_amount=1.0)
+    dividend_adjusted = apply_dividend_adjustment([first, second], [dividend], second.timestamp)
+    assert dividend_adjusted[0].close == pytest.approx(first.close - 1.0)
+    assert dividend_adjusted[1].close == second.close
+    assert apply_dividend_adjustment([first, second], [], second.timestamp) == [first, second]
 
 
 def test_risk_limits_and_hard_controls() -> None:

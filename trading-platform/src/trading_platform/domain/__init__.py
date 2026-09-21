@@ -49,9 +49,12 @@ class Bar:
     close: float
     volume: int
     session: TradingSession = TradingSession.DAY
+    available_at: datetime | None = None
 
     def __post_init__(self) -> None:
-        _require_utc(self.timestamp)
+        require_utc(self.timestamp)
+        if self.available_at is not None:
+            require_utc(self.available_at)
         prices = (self.open, self.high, self.low, self.close)
         if any(not math.isfinite(price) or price <= 0 for price in prices):
             raise ValueError("bar prices must be finite and positive")
@@ -83,7 +86,7 @@ class CorporateAction:
     cash_amount: float | None = None  # dividend cash per share
 
     def __post_init__(self) -> None:
-        _require_utc(self.ex_date)
+        require_utc(self.ex_date)
         if self.action_type in (CorporateActionType.SPLIT, CorporateActionType.REVERSE_SPLIT):
             if self.ratio is None or not math.isfinite(self.ratio) or self.ratio <= 0:
                 raise ValueError("split corporate actions require a positive finite ratio")
@@ -171,7 +174,7 @@ class Order:
             raise ValueError("order quantity must be positive")
         if self.price is not None and (not math.isfinite(self.price) or self.price <= 0):
             raise ValueError("order price must be finite and positive")
-        _require_utc(self.created_at)
+        require_utc(self.created_at)
 
 
 class OrderStatus(Enum):
@@ -275,14 +278,14 @@ class JournalEvent:
     checksum: str
 
     def __post_init__(self) -> None:
-        _require_utc(self.timestamp)
+        require_utc(self.timestamp)
 
     @property
     def event_date(self) -> str:
         return self.timestamp.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def _require_utc(value: datetime) -> None:
+def require_utc(value: datetime) -> None:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("timestamps must be timezone-aware")
 
