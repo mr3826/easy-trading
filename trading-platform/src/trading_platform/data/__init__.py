@@ -6,7 +6,15 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from trading_platform.domain import Bar, Instrument, TradingSession
+from trading_platform.domain import (
+    Bar,
+    CorporateAction,
+    Instrument,
+    TradingSession,
+)
+from trading_platform.domain import (
+    CorporateActionType as CorporateActionType,
+)
 
 
 class DataFrequency(Enum):
@@ -104,24 +112,8 @@ class CorporateActionProvider:
 
 
 # ---- CorporateAction type ----
-
-
-class CorporateActionType(Enum):
-    SPLIT = "split"
-    DIVIDEND = "dividend"
-    REVERSE_SPLIT = "reverse_split"
-    DELISTING = "delisting"
-
-
-@dataclass(frozen=True)
-class CorporateAction:
-    instrument: Instrument
-    action_type: CorporateActionType
-    ex_date: datetime
-    record_date: datetime | None = None
-    pay_date: datetime | None = None
-    ratio: float | None = None  # e.g., 2.0 for 2-for-1 split
-    cash_amount: float | None = None  # dividend cash per share
+# Canonical definition: ``trading_platform.domain.CorporateAction`` (enum-based,
+# frozen) re-exported here so the data layer and domain share one type.
 
 
 # ---- Parquet-backed implementation skeleton ----
