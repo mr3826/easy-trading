@@ -46,7 +46,7 @@ class DataMetadata:
     checksum: str  # SHA256 of the file contents
     license: str | None = None
     vendor_identifier: str | None = None  # Vendor-specific symbol mapping
-    available_at: datetime | None = None  # Dataset visibility timestamp for point-in-time reads
+    available_at: datetime | None = None  # Max per-row availability in the file (informational)
 
 
 # ---- MarketDataProvider Interface ----
@@ -154,13 +154,14 @@ class ParquetMarketDataProvider(MarketDataProvider):
         {data_dir}/symbol={SYMBOL}/year={YYYY}/part-{index:04d}-{dataset_version}.parquet
 
     Each file carries columns: instrument_symbol, timestamp, open, high, low,
-    close, volume, available_at (all timestamps UTC; one available_at value per
-    file, defaulting to the max bar timestamp at write time). File-level
-    provenance (source, schema_version, dataset_version, retrieval_timestamp,
-    available_at) is embedded in the Arrow schema metadata; the checksum is the
-    SHA-256 of the raw file bytes computed at load and cached per path.
+    close, volume, available_at (all timestamps UTC; available_at per row —
+    bar provenance when set, else the batch argument, else the bar timestamp).
+    File-level provenance (source, schema_version, dataset_version,
+    retrieval_timestamp, max available_at) is embedded in the Arrow schema
+    metadata; the checksum is the SHA-256 of the raw file bytes computed at
+    load and cached per path.
 
-    Point-in-time semantics: get_bars(as_of=T) reads only files with
+    Point-in-time semantics: get_bars(as_of=T) filters rows with
     available_at <= T, then resolves revisions per timestamp by highest
     dataset_version. Writing a revision requires an explicit dataset_version
     bump; same-version duplicates are rejected. Superseded records remain
@@ -231,8 +232,6 @@ class ParquetMarketDataProvider(MarketDataProvider):
         superseded_entries: List[Dict[str, Any]] = []
         for path in self._parquet_files(instrument.symbol):
             metadata = self._read_metadata(path)
-            if as_of is not None and metadata.available_at is not None and metadata.available_at > as_of:
-                continue
             version_key = _version_key(metadata.dataset_version)
             table = pq.read_table(path)
             missing = [column for column in _REQUIRED_BAR_COLUMNS if column not in table.column_names]
@@ -245,11 +244,18 @@ class ParquetMarketDataProvider(MarketDataProvider):
             lows = table.column("low").to_pylist()
             closes = table.column("close").to_pylist()
             volumes = table.column("volume").to_pylist()
+            if "available_at" in table.column_names:
+                available_ats = table.column("available_at").to_pylist()
+            else:
+                available_ats = [None] * len(timestamps)
             for index in range(len(timestamps)):
                 if symbols[index] != instrument.symbol:
                     continue
                 timestamp = _to_utc_datetime(timestamps[index])
                 if not (start <= timestamp <= end):
+                    continue
+                available_at = _to_utc_datetime(available_ats[index]) if available_ats[index] else timestamp
+                if as_of is not None and available_at > as_of:
                     continue
                 entry = {
                     "instrument": instrument,
@@ -259,7 +265,7 @@ class ParquetMarketDataProvider(MarketDataProvider):
                     "low": float(lows[index]),
                     "close": float(closes[index]),
                     "volume": int(volumes[index]),
-                    "available_at": metadata.available_at or timestamp,
+                    "available_at": available_at,
                 }
                 existing = resolved.get(timestamp)
                 if existing is None or version_key > existing[0]:
@@ -342,16 +348,22 @@ class ParquetMarketDataProvider(MarketDataProvider):
     ) -> List[Path]:
         """Write bars to normalized Parquet files and return the written paths.
 
-        Duplicate timestamps are rejected within the batch and against records
-        already stored under the same dataset version; superseding an existing
-        record requires an explicit dataset_version bump.
+        Each row carries its own available_at (bar provenance when set, else
+        the batch-level ``available_at`` argument, else the bar timestamp);
+        file-level metadata records the max row availability. Duplicate
+        timestamps are rejected within the batch and against records already
+        stored under the same dataset version; superseding an existing record
+        requires an explicit dataset_version bump.
         """
         if not bars:
             raise ValueError("write_bars requires a non-empty bar list")
         if available_at is not None:
             require_utc(available_at)
         retrieval_timestamp = datetime.now(timezone.utc)
-        resolved_available_at = available_at if available_at is not None else max(bar.timestamp for bar in bars)
+
+        def row_available_at(bar: Bar) -> datetime:
+            return bar.available_at or available_at or bar.timestamp
+
         groups: Dict[Tuple[str, int], List[Bar]] = {}
         for bar in bars:
             groups.setdefault((bar.instrument.symbol, bar.timestamp.astimezone(timezone.utc).year), []).append(bar)
@@ -380,6 +392,8 @@ class ParquetMarketDataProvider(MarketDataProvider):
             index = len(list(partition_dir.glob("*.parquet"))) + 1
             path = partition_dir / f"part-{index:04d}-{dataset_version}.parquet"
             ordered = sorted(group, key=lambda bar: bar.timestamp)
+            row_available = [row_available_at(bar) for bar in ordered]
+            file_available_at = max(row_available)
             table = pa.table(
                 {
                     "instrument_symbol": pa.array([symbol] * len(ordered), type=pa.string()),
@@ -389,14 +403,14 @@ class ParquetMarketDataProvider(MarketDataProvider):
                     "low": pa.array([float(bar.low) for bar in ordered], type=pa.float64()),
                     "close": pa.array([float(bar.close) for bar in ordered], type=pa.float64()),
                     "volume": pa.array([int(bar.volume) for bar in ordered], type=pa.int64()),
-                    "available_at": pa.array([resolved_available_at] * len(ordered), type=pa.timestamp("ns", tz="UTC")),
+                    "available_at": pa.array(row_available, type=pa.timestamp("ns", tz="UTC")),
                 },
                 metadata={
                     b"source": source.encode(),
                     b"schema_version": schema_version.encode(),
                     b"dataset_version": dataset_version.encode(),
                     b"retrieval_timestamp": retrieval_timestamp.isoformat().encode(),
-                    b"available_at": resolved_available_at.isoformat().encode(),
+                    b"available_at": file_available_at.isoformat().encode(),
                 },
             )
             pq.write_table(table, path)
