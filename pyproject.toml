@@ -27,6 +27,9 @@ dev = [
     "pyarrow>=15.0.0",
     "cryptography>=42.0.0",
 ]
+ibkr = [
+    "ib_async>=1.0.3",
+]
 
 [project.scripts]
 trading-platform = "trading_platform.cli:main"

@@ -7,7 +7,8 @@ from trading_platform.observability import check_dependency
 
 
 def test_core_migration_has_append_only_and_idempotency_constraints() -> None:
-    sql = Path("trading-platform/migrations/0001_core.sql").read_text()
+    migration_path = Path(__file__).resolve().parents[2] / "migrations" / "0001_core.sql"
+    sql = migration_path.read_text()
     assert "UNIQUE" in sql
     assert "prevent_journal_update" in sql
     assert "TIMESTAMPTZ" in sql

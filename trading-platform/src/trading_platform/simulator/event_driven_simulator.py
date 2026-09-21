@@ -34,7 +34,7 @@ class FillAssumption(Enum):
 
     CLOSE = "close"  # Retained only to reject unsafe legacy configuration
     NEXT_OPEN = "next_open"  # Execute at next open price
-    MARKET = "market"  # Execute at prevailing market price
+    MARKET = "market"  # Execute at next open price (same-bar close is lookahead for completed-bar decisions)
     LIMIT = "limit"  # Execute at limit price or better
 
 
@@ -57,6 +57,7 @@ class FillResult:
     timestamp: datetime
     execution_id: str
     remaining_quantity: int  # Quantity not filled (for partial fills)
+    realized_pnl: float  # Realized PnL closed by this fill
 
 
 @dataclass(frozen=True)
@@ -99,12 +100,14 @@ class EventDrivenSimulator:
         commission_rate: float = 1.0,
         start_cash: float = 10000.0,
         fill_assumption: FillAssumption = FillAssumption.NEXT_OPEN,
+        seed: int = 0,
     ):
         self.mode = mode
         self.commission_model = commission_model
         self.commission_rate = commission_rate
         self.start_cash = start_cash
         self.fill_assumption = fill_assumption
+        self.seed = seed
         if fill_assumption == FillAssumption.CLOSE:
             raise ValueError("CLOSE execution is unsafe for completed-bar decisions; use NEXT_OPEN")
 
@@ -199,8 +202,7 @@ class EventDrivenSimulator:
         self.event_timestamp = bar.timestamp
 
         if signal is None:
-            # No signal for this bar - record portfolio state, no orders
-            self._record_portfolio_state(bar.timestamp)
+            # No signal for this bar - no orders; run() records portfolio state
             return
 
         self._handle_signal(signal, bar)
@@ -219,26 +221,27 @@ class EventDrivenSimulator:
             )
         )
 
-        # 2. Risk engine check
-        risk_decision = self._risk_engine(signal)
+        # 2. Order intent creation (before the risk check so every decision
+        # references the real intent)
+        order_intent = OrderIntent(
+            signal=signal,
+            order_id=f"order-{self.event_timestamp.timestamp()}",
+        )
+
+        # 3. Risk engine check
+        risk_decision = self._risk_engine(signal, order_intent)
         if not risk_decision.approved:
             self.reject_count += 1
             self.order_ledger.append(
                 OrderEvent(
                     event_type="RISK_REJECTION",
                     timestamp=self.event_timestamp,
-                    order_id=signal.instrument.symbol,
+                    order_id=order_intent.order_id,
                     instrument=signal.instrument,
                     detail={"reason": risk_decision.reason},
                 )
             )
             return
-
-        # 3. Order intent creation
-        order_intent = OrderIntent(
-            signal=signal,
-            order_id=f"order-{self.event_timestamp.timestamp()}",
-        )
 
         # 4. OMS order creation
         order = Order(
@@ -285,6 +288,7 @@ class EventDrivenSimulator:
                         "fill_quantity": fill_result.fill_quantity,
                         "fill_price": fill_result.fill_price,
                         "fill_commission": fill_result.fill_commission,
+                        "realized_pnl": fill_result.realized_pnl,
                     },
                 )
             )
@@ -304,7 +308,7 @@ class EventDrivenSimulator:
 
     # ---- Risk engine ----
 
-    def _risk_engine(self, signal: Signal) -> RiskDecision:
+    def _risk_engine(self, signal: Signal, order_intent: OrderIntent) -> RiskDecision:
         """Run the risk engine on a signal.
 
         Checks:
@@ -337,7 +341,7 @@ class EventDrivenSimulator:
         position_count = len(self.positions)
         if position_count >= 3 and target_qty != current_pos.quantity:
             return RiskDecision(
-                order_intent=OrderIntent(signal=signal, order_id="dummy"),
+                order_intent=order_intent,
                 approved=False,
                 reason="Max position count (3) reached",
             )
@@ -351,7 +355,7 @@ class EventDrivenSimulator:
 
             if self.cash < total_cost:
                 return RiskDecision(
-                    order_intent=OrderIntent(signal=signal, order_id="dummy"),
+                    order_intent=order_intent,
                     approved=False,
                     reason=f"Insufficient cash: need {total_cost:.2f}, have {self.cash:.2f}",
                     position_notional=estimated_cost,
@@ -364,7 +368,7 @@ class EventDrivenSimulator:
         position_notional = abs(quantity) * (signal.price or 0)
 
         return RiskDecision(
-            order_intent=OrderIntent(signal=signal, order_id="dummy"),
+            order_intent=order_intent,
             approved=True,
             reason="Within risk limits",
             position_notional=position_notional,
@@ -397,6 +401,7 @@ class EventDrivenSimulator:
                 timestamp=self.event_timestamp,
                 execution_id=f"unfilled-{self.event_timestamp.timestamp()}-{order.order_id}",
                 remaining_quantity=quantity,
+                realized_pnl=0.0,
             )
 
         # Determine fill price based on assumption
@@ -411,10 +416,13 @@ class EventDrivenSimulator:
 
         # Calculate slippage (difference between signal intent and fill)
         slippage = Decimal("0")
-        if price is not None and side == OrderSide.BUY:
-            # For a buy order, slippage = fill_price - signal_price (positive = bad)
-            if fill_price > price:
+        if price is not None:
+            if side == OrderSide.BUY and fill_price > price:
+                # For a buy order, slippage = fill_price - signal_price (positive = bad)
                 slippage = Decimal(str(fill_price - price))
+            elif side == OrderSide.SELL and fill_price < price:
+                # For a sell order, slippage = signal_price - fill_price (positive = bad)
+                slippage = Decimal(str(price - fill_price))
 
         # Calculate total cost
         fill_cost = fill_price * abs(actual_qty) + float(commission)
@@ -494,6 +502,7 @@ class EventDrivenSimulator:
             timestamp=self.event_timestamp,
             execution_id=execution_id,
             remaining_quantity=quantity - actual_qty,  # For partial fills
+            realized_pnl=float(realized_from_this),
         )
 
     # ---- Fill price calculation ----
@@ -523,9 +532,9 @@ class EventDrivenSimulator:
         """Calculate the actual fill price based on the fill assumption.
 
         V1 fill assumptions:
-        - CLOSE: execute at bar close price
+        - CLOSE: prohibited (raises)
         - NEXT_OPEN: execute at next bar's open price
-        - MARKET: execute at prevailing market price (close + slippage)
+        - MARKET: execute at the next bar's open price (same-bar close would be lookahead)
         - LIMIT: execute at limit price or better
         """
         if fill_assumption := self.fill_assumption:
@@ -542,11 +551,16 @@ class EventDrivenSimulator:
                 return min(bar.open, signal_price)
 
             elif fill_assumption == FillAssumption.MARKET:
-                # Market order: execute at close with slippage
-                # Slippage modeled as small random deviation or fixed percent
-                slippage_pct = Decimal("0.001")  # 0.1% default
-                adj = bar.close * float(slippage_pct)
-                return bar.close + adj if side == OrderSide.BUY else bar.close - adj
+                # Market order: fills at the next bar's open, consistent with
+                # NEXT_OPEN. Filling at the same bar's close would allow a
+                # signal derived from that close to trade on stale prices.
+                if signal_price is None or order_type == OrderType.MARKET:
+                    return bar.open
+                if order_type in (OrderType.LIMIT, OrderType.STOP_LIMIT):
+                    return min(bar.open, signal_price) if side == OrderSide.BUY else max(bar.open, signal_price)
+                if side == OrderSide.BUY:
+                    return max(bar.open, signal_price)
+                return min(bar.open, signal_price)
 
             elif fill_assumption == FillAssumption.LIMIT:
                 # Limit order: execute at signal price or better
@@ -577,7 +591,7 @@ class EventDrivenSimulator:
         if side == OrderSide.BUY and self.cash < total_cost:
             # Can't afford full quantity - reduce to what we can afford
             affordable = max(0, int((self.cash - estimated_commission) / fill_price))
-            return -affordable if side == OrderSide.SELL else affordable
+            return affordable
 
         return qty if side == OrderSide.BUY else -qty
 
