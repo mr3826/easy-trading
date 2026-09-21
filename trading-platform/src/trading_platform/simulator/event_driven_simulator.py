@@ -131,22 +131,16 @@ class EventDrivenSimulator:
     def run(
         self,
         bars: List[Bar],
-        signals: List[Signal],
+        signals: List[Signal | None],
         initial_portfolio: PortfolioSnapshot | None = None,
     ) -> SimulationResult:
         """Run the event-driven simulation.
 
         The event loop processes bars in timestamp order, modeling the full
-        strategy → risk → OMS → execution pipeline. Signals are processed
-        sequentially, one per bar, in the order provided.
-
-        Args:
-            bars: Daily bar data for the simulation period
-            signals: Order signals to execute (one per bar, in order)
-            initial_portfolio: Starting portfolio state
-
-        Returns:
-            SimulationResult with all state and reports
+        strategy → risk → OMS → execution pipeline. Signals must contain one
+        entry per bar, in bar order: signals[i] is generated from completed
+        bar i and executes on bar i+1; None entries mean no signal for that
+        bar.
         """
         # Initialize state
         if initial_portfolio:
@@ -171,15 +165,12 @@ class EventDrivenSimulator:
         # A signal made from completed bar D becomes eligible on the next bar.
         pending_signal: Signal | None = None
         for signal_idx, bar in enumerate(sorted_bars):
-            self._process_bar(bar, pending_signal)
+            signal_number = signal_idx + 1
+            self._process_bar(bar, pending_signal, signal_number)
             pending_signal = signals[signal_idx] if signal_idx < len(signals) else None
 
             # Record portfolio state after bar processing
             self._record_portfolio_state(bar.timestamp)
-
-        # Process any remaining signals after last bar
-        # (signals without corresponding bars are ignored in V1)
-        # No additional portfolio state recording needed - already recorded
 
         return SimulationResult(
             final_portfolio=self._make_portfolio_snapshot(
@@ -196,7 +187,7 @@ class EventDrivenSimulator:
 
     # ---- Bar processing ----
 
-    def _process_bar(self, bar: Bar, signal: Signal | None) -> None:
+    def _process_bar(self, bar: Bar, signal: Signal | None, signal_number: int = 0) -> None:
         """Process a single bar with an associated signal (or None)."""
 
         self.event_timestamp = bar.timestamp
@@ -205,17 +196,17 @@ class EventDrivenSimulator:
             # No signal for this bar - no orders; run() records portfolio state
             return
 
-        self._handle_signal(signal, bar)
+        self._handle_signal(signal, bar, signal_number)
 
-    def _handle_signal(self, signal: Signal, bar: Bar) -> None:
+    def _handle_signal(self, signal: Signal, bar: Bar, signal_number: int) -> None:
         """Handle a single trading signal through the pipeline."""
 
-        # 1. Signal generation (already done, now pipeline processing)
+        # 1. Signal record (the signal was generated from completed bars)
         self.order_ledger.append(
             OrderEvent(
                 event_type="SIGNAL",
                 timestamp=self.event_timestamp,
-                order_id=f"signal-{self.event_timestamp.timestamp()}-{id(signal)}",
+                order_id=f"signal-{self.event_timestamp.timestamp()}-{signal_number}",
                 instrument=signal.instrument,
                 detail={"signal": signal.side.name, "quantity": signal.quantity},
             )
