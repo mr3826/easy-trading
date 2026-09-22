@@ -1,9 +1,11 @@
+import asyncio
 from pathlib import Path
 
 import pytest
 from cryptography.exceptions import InvalidTag
 from trading_platform.backup import checksum, decrypt_backup, encrypt_backup, verify_checksum
 from trading_platform.observability import check_dependency
+from trading_platform.persistence.postgres import PersistenceUnavailable, PostgresStore
 
 
 def test_core_migration_has_append_only_and_idempotency_constraints() -> None:
@@ -12,6 +14,21 @@ def test_core_migration_has_append_only_and_idempotency_constraints() -> None:
     assert "UNIQUE" in sql
     assert "prevent_journal_update" in sql
     assert "TIMESTAMPTZ" in sql
+
+
+def test_shadow_decisions_migration_declares_replay_columns() -> None:
+    migration_path = Path(__file__).resolve().parents[2] / "migrations" / "0002_shadow_decisions.sql"
+    sql = migration_path.read_text()
+    assert "decision_id TEXT PRIMARY KEY" in sql
+    assert "bar_timestamp TIMESTAMPTZ NOT NULL" in sql
+    assert "decision JSONB NOT NULL" in sql
+    assert "recorded_at TIMESTAMPTZ NOT NULL DEFAULT now()" in sql
+
+
+def test_shadow_decision_validation_fails_closed_before_database_access() -> None:
+    store = PostgresStore("postgresql://postgres:postgres@127.0.0.1:5433/trading_platform_test")
+    with pytest.raises(PersistenceUnavailable):
+        asyncio.run(store.record_shadow_decision({"symbol": "AAPL"}))
 
 
 def test_backup_checksum_detects_tampering(tmp_path: Path) -> None:
