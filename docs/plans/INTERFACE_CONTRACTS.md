@@ -8,8 +8,9 @@ approval and a note in this file.
 
 ```python
 class MarketDataProvider(Protocol):
-    def get_bars(self, instrument: Instrument, start: datetime, end: datetime,
-                 session: TradingSession = TradingSession.DAY) -> List[Bar]: ...
+    def get_bars(
+        self, instrument: Instrument, start: datetime, end: datetime, session: TradingSession = TradingSession.DAY
+    ) -> List[Bar]: ...
     def has_bars(self, instrument: Instrument, start: datetime, end: datetime) -> bool: ...
     def get_latest_bar(self, instrument: Instrument) -> Bar | None: ...
     def get_metadata(self, instrument: Instrument) -> DataMetadata: ...
@@ -32,7 +33,7 @@ Contract terms:
 
 ```python
 @dataclass(frozen=True)
-class BrokerSnapshot:          # exists in domain/__init__.py, currently unused
+class BrokerSnapshot:  # exists in domain/__init__.py, currently unused
     positions: Dict[str, int]
     cash: float
     buying_power: float | None = None
