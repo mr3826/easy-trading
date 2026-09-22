@@ -101,6 +101,7 @@ class EventDrivenSimulator:
         start_cash: float = 10000.0,
         fill_assumption: FillAssumption = FillAssumption.NEXT_OPEN,
         seed: int = 0,
+        max_positions: int = 3,
     ):
         self.mode = mode
         self.commission_model = commission_model
@@ -108,6 +109,9 @@ class EventDrivenSimulator:
         self.start_cash = start_cash
         self.fill_assumption = fill_assumption
         self.seed = seed
+        if max_positions <= 0:
+            raise ValueError("max_positions must be positive")
+        self.max_positions = max_positions
         if fill_assumption == FillAssumption.CLOSE:
             raise ValueError("CLOSE execution is unsafe for completed-bar decisions; use NEXT_OPEN")
 
@@ -192,6 +196,22 @@ class EventDrivenSimulator:
 
         self.event_timestamp = bar.timestamp
 
+        if bar.available_at is not None and bar.available_at > bar.timestamp:
+            if signal is not None:
+                self.order_ledger.append(
+                    OrderEvent(
+                        event_type="DATA_REJECTED",
+                        timestamp=self.event_timestamp,
+                        order_id=f"data-{self.event_timestamp.timestamp()}-{signal_number}",
+                        instrument=bar.instrument,
+                        detail={
+                            "reason": "bar was not point-in-time available at its decision timestamp",
+                            "available_at": bar.available_at.isoformat(),
+                        },
+                    )
+                )
+            return
+
         if signal is None:
             # No signal for this bar - no orders; run() records portfolio state
             return
@@ -220,7 +240,7 @@ class EventDrivenSimulator:
         )
 
         # 3. Risk engine check
-        risk_decision = self._risk_engine(signal, order_intent)
+        risk_decision = self._risk_engine(signal, order_intent, bar)
         if not risk_decision.approved:
             self.reject_count += 1
             self.order_ledger.append(
@@ -267,7 +287,7 @@ class EventDrivenSimulator:
         fill_result = self._execute_order(order, bar)
 
         # 6. Fill processing - already handled in _execute_order (position update, cash, etc.)
-        if fill_result.fill_quantity > 0:
+        if fill_result.fill_quantity != 0:
             # Record in trade ledger
             self.trade_ledger.append(
                 OrderEvent(
@@ -299,7 +319,7 @@ class EventDrivenSimulator:
 
     # ---- Risk engine ----
 
-    def _risk_engine(self, signal: Signal, order_intent: OrderIntent) -> RiskDecision:
+    def _risk_engine(self, signal: Signal, order_intent: OrderIntent, bar: Bar) -> RiskDecision:
         """Run the risk engine on a signal.
 
         Checks:
@@ -325,23 +345,31 @@ class EventDrivenSimulator:
             ),
         )
 
-        # Calculate target position
-        target_qty = current_pos.quantity + (quantity if side == OrderSide.BUY else -quantity)
-
-        # Check position limit (V1: max 3 positions)
-        position_count = len(self.positions)
-        if position_count >= 3 and target_qty != current_pos.quantity:
+        # Long-only: a sell cannot create a short position.
+        if side == OrderSide.SELL and current_pos.quantity < quantity:
             return RiskDecision(
                 order_intent=order_intent,
                 approved=False,
-                reason="Max position count (3) reached",
+                reason=f"Long-only violation: held {current_pos.quantity}, requested sell {quantity}",
+                policy_version="simulator-v1",
+            )
+
+        # Check position limit for new positive exposure; exits remain allowed.
+        position_count = len(self.positions)
+        if side == OrderSide.BUY and position_count >= self.max_positions and current_pos.quantity == 0:
+            return RiskDecision(
+                order_intent=order_intent,
+                approved=False,
+                reason=f"Max position count ({self.max_positions}) reached",
+                policy_version="simulator-v1",
             )
 
         # Cash check for BUY orders
-        if side == OrderSide.BUY and signal.price is not None:
+        estimated_price = signal.price if signal.price is not None else bar.open
+        if side == OrderSide.BUY:
             # Estimate cost including commission
-            estimated_cost = abs(quantity) * signal.price
-            estimated_commission = float(self._estimate_commission(abs(quantity), signal.price))
+            estimated_cost = abs(quantity) * estimated_price
+            estimated_commission = float(self._estimate_commission(abs(quantity), estimated_price))
             total_cost = estimated_cost + estimated_commission
 
             if self.cash < total_cost:
@@ -350,19 +378,21 @@ class EventDrivenSimulator:
                     approved=False,
                     reason=f"Insufficient cash: need {total_cost:.2f}, have {self.cash:.2f}",
                     position_notional=estimated_cost,
+                    policy_version="simulator-v1",
                 )
 
         # Check sector concentration (simplified: just count positions)
         # In V1 with max 3 positions, this is inherently limited
 
         # Approve
-        position_notional = abs(quantity) * (signal.price or 0)
+        position_notional = abs(quantity) * estimated_price
 
         return RiskDecision(
             order_intent=order_intent,
             approved=True,
             reason="Within risk limits",
             position_notional=position_notional,
+            policy_version="simulator-v1",
         )
 
     # ---- Order execution ----
@@ -402,7 +432,8 @@ class EventDrivenSimulator:
         # For V1 cash account with whole-share quantization
         actual_qty = self._quantize_shares(quantity, side, fill_price, bar)
 
-        # Calculate commission
+        # Calculate commission; a zero-share execution is not a fill and
+        # cannot incur a fee.
         commission = self._estimate_commission(abs(actual_qty), fill_price)
 
         # Calculate slippage (difference between signal intent and fill)
@@ -415,8 +446,10 @@ class EventDrivenSimulator:
                 # For a sell order, slippage = signal_price - fill_price (positive = bad)
                 slippage = Decimal(str(price - fill_price))
 
-        # Calculate total cost
-        fill_cost = fill_price * abs(actual_qty) + float(commission)
+        # Calculate net cash impact. Sell commission reduces proceeds; it is
+        # never added to cash as if it were additional sale value.
+        gross_notional = fill_price * abs(actual_qty)
+        fill_cost = gross_notional + float(commission) if side == OrderSide.BUY else gross_notional - float(commission)
 
         # Cash update
         if side == OrderSide.BUY:
@@ -593,6 +626,8 @@ class EventDrivenSimulator:
 
         V1: Fixed commission model - $1.00 per order.
         """
+        if qty <= 0:
+            return Decimal("0")
         if self.commission_model == CommissionModel.FIXED:
             return Decimal(str(self.commission_rate))
         elif self.commission_model == CommissionModel.PER_SHARE:

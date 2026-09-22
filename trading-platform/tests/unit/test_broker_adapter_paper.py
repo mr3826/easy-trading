@@ -20,9 +20,11 @@ from trading_platform.domain import (
     BrokerSnapshot,
     Instrument,
     Order,
+    OrderIntent,
     OrderSide,
     OrderStatus,
     OrderType,
+    RiskDecision,
     Signal,
     TimeInForce,
 )
@@ -303,7 +305,9 @@ def ib_async_fake(monkeypatch):
 @pytest.fixture
 def connected_adapter(ib_async_fake):
     ib = FakeIB()
-    adapter = IBKRPaperBrokerAdapter(allow_connection=True, allow_paper_orders=True, ib_instance=ib)
+    adapter = IBKRPaperBrokerAdapter(
+        allow_connection=True, allow_paper_orders=True, account="DU1234567", ib_instance=ib
+    )
     assert adapter.start(), adapter.get_last_error()
     return adapter, ib
 
@@ -322,8 +326,18 @@ def make_order(
 ) -> Order:
     instrument = Instrument("AAPL")
     signal = Signal(instrument, side, quantity, price, order_type, TimeInForce.DAY)
+    intent = OrderIntent(signal=signal, order_id=order_id)
     return Order(
-        order_id, instrument, side, quantity, price, order_type, TimeInForce.DAY, OrderStatus.SUBMITTED, signal
+        order_id,
+        instrument,
+        side,
+        quantity,
+        price,
+        order_type,
+        TimeInForce.DAY,
+        OrderStatus.SUBMITTED,
+        signal,
+        risk_decision=RiskDecision(intent, True, reason="test approval", policy_version="test-v1"),
     )
 
 
@@ -370,10 +384,19 @@ def test_paper_targets_accepted() -> None:
 
 def test_connect_lifecycle_with_mocked_client(ib_async_fake) -> None:
     ib = FakeIB()
-    adapter = IBKRPaperBrokerAdapter(allow_connection=True, host="127.0.0.1", port=7497, client_id=7, ib_instance=ib)
+    adapter = IBKRPaperBrokerAdapter(
+        allow_connection=True,
+        host="127.0.0.1",
+        port=7497,
+        client_id=7,
+        account="DU1234567",
+        ib_instance=ib,
+    )
     assert adapter.start()
     assert adapter.connected
-    assert ib.connect_calls == [{"host": "127.0.0.1", "port": 7497, "clientId": 7, "readonly": False, "account": ""}]
+    assert ib.connect_calls == [
+        {"host": "127.0.0.1", "port": 7497, "clientId": 7, "readonly": False, "account": "DU1234567"}
+    ]
     assert adapter.stop()
     assert not adapter.connected
     assert not ib.isConnected()
@@ -384,7 +407,7 @@ def test_connect_lifecycle_with_mocked_client(ib_async_fake) -> None:
 def test_connect_failure_records_error(monkeypatch) -> None:
     module = fake_ib_async_module(UnconnectableIB)
     monkeypatch.setitem(sys.modules, "ib_async", module)
-    adapter = IBKRPaperBrokerAdapter(allow_connection=True)
+    adapter = IBKRPaperBrokerAdapter(allow_connection=True, account="DU1234567")
     assert not adapter.start()
     assert adapter.get_last_error() is not None
     assert not adapter.connected
@@ -392,7 +415,7 @@ def test_connect_failure_records_error(monkeypatch) -> None:
 
 def test_missing_ib_async_library_surfaces_error(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "ib_async", None)
-    adapter = IBKRPaperBrokerAdapter(allow_connection=True)
+    adapter = IBKRPaperBrokerAdapter(allow_connection=True, account="DU1234567")
     assert not adapter.start()
     assert "ib_async" in adapter.get_last_error()
 

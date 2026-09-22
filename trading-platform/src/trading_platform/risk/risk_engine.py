@@ -21,6 +21,7 @@ Phase 7 additions:
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
@@ -114,8 +115,8 @@ class HardRiskEngine:
     ) -> None:
         # Policy history: most recent first
         self.policy_history: List[RiskPolicyVersion] = policies or []
-        # Active policy (most recent with effective_from <= now)
-        self.active_policy: Optional[RiskPolicyVersion] = self.policy_history[0] if self.policy_history else None
+        self.active_policy: Optional[RiskPolicyVersion] = None
+        self._refresh_active_policy()
         # Decision audit log: order_id -> (policy_version, decision, reason)
         self.decision_audit: List[tuple[int, str, str]] = []
         self.strategy_disabled = False
@@ -128,9 +129,16 @@ class HardRiskEngine:
     # ---- Policy management ----
 
     def add_policy(self, policy: RiskPolicyVersion) -> None:
-        """Add a new risk policy; becomes active immediately."""
-        self.policy_history.insert(0, policy)
-        self.active_policy = policy
+        """Add a risk policy; it becomes active at its effective timestamp."""
+        self.policy_history.append(policy)
+        self.policy_history.sort(key=lambda candidate: candidate.effective_from, reverse=True)
+        self._refresh_active_policy()
+
+    def _refresh_active_policy(self, now: datetime | None = None) -> None:
+        """Select the newest policy whose effective time has arrived."""
+        current = now or datetime.now(timezone.utc)
+        eligible = [policy for policy in self.policy_history if policy.effective_from <= current]
+        self.active_policy = max(eligible, key=lambda policy: policy.effective_from) if eligible else None
 
     def set_active_policy(self, version: int) -> None:
         """Set active policy by version number."""
@@ -164,6 +172,7 @@ class HardRiskEngine:
 
         Returns (approved, reason, active_policy).
         """
+        self._refresh_active_policy()
         pv = self.active_policy
 
         if self.reconciliation is not None and getattr(self.reconciliation, "blocks_new_orders", False):
@@ -189,16 +198,34 @@ class HardRiskEngine:
             return False, "New positions are blocked", pv
         if order.side.name == "BUY" and (order.price is None or order.price <= 0):
             return False, "Buy order requires a positive decision price", pv
+        if pv.max_drawdown_pct is not None and starting_cash is None:
+            reason = "Starting cash is required for drawdown enforcement"
+            self.decision_audit.append((policy_version, "REJECT", reason))
+            return False, reason, pv
         if starting_cash is not None and starting_cash > 0:
             drawdown_pct = (starting_cash - current_cash) / starting_cash * 100
             if drawdown_pct > pv.max_drawdown_pct:
                 reason = f"Max drawdown exceeded: {drawdown_pct:.1f}% > {pv.max_drawdown_pct:.1f}%"
                 self.decision_audit.append((policy_version, "REJECT", reason))
                 return False, reason, pv
+        if pv.max_daily_loss is not None and daily_loss is None:
+            reason = "Daily loss telemetry is required for loss-limit enforcement"
+            self.decision_audit.append((policy_version, "REJECT", reason))
+            return False, reason, pv
         if pv.max_daily_loss is not None and daily_loss is not None and daily_loss > pv.max_daily_loss:
             reason = f"Max daily loss exceeded: {daily_loss:.2f} > {pv.max_daily_loss:.2f}"
             self.decision_audit.append((policy_version, "REJECT", reason))
             return False, reason, pv
+        if order.side.name == "SELL":
+            held = positions.get(order.instrument.symbol)
+            held_quantity = int(getattr(held, "quantity", held if isinstance(held, (int, float)) else 0))
+            if held_quantity < order.quantity:
+                reason = (
+                    f"Long-only violation: cannot sell {order.quantity} shares of "
+                    f"{order.instrument.symbol}; held {held_quantity}"
+                )
+                self.decision_audit.append((policy_version, "REJECT", reason))
+                return False, reason, pv
         if (
             order.side.name == "BUY"
             and getattr(self.oms, "require_protective_orders", False)
@@ -216,7 +243,10 @@ class HardRiskEngine:
             return False, f"Position limit: {reason}", pv
 
         # 2. Gross exposure check
-        gross_approved, gross_reason = check_gross_exposure(positions, pv.max_gross_exposure)
+        proposed_notional = order.quantity * (order.price or 0.0) if order.side.name == "BUY" else 0.0
+        gross_approved, gross_reason = check_gross_exposure(
+            positions, pv.max_gross_exposure, proposed_notional=proposed_notional
+        )
         if not gross_approved:
             self.decision_audit.append((policy_version, "REJECT", f"Gross exposure: {gross_reason}"))
             return False, f"Gross exposure: {gross_reason}", pv
@@ -233,8 +263,10 @@ class HardRiskEngine:
                 positions,
                 None,  # sector_map omitted
             )
-        except Exception:
-            sector_approved = True  # continue without sector check
+        except Exception as exc:
+            reason = f"Sector concentration check failed closed: {exc}"
+            self.decision_audit.append((policy_version, "REJECT", reason))
+            return False, reason, pv
         if not sector_approved:
             self.decision_audit.append((policy_version, "REJECT", f"Sector concentration: {sector_reason}"))
             return False, f"Sector concentration: {sector_reason}", pv
@@ -249,7 +281,7 @@ class HardRiskEngine:
             return False, f"Buying power: {buy_reason}", pv
 
         # 4. Portfolio risk limits (drawdown, turnover, cash reserve)
-        if portfolio_risk_limits and self.active_policy:
+        if self.active_policy:
             # Drawdown check
             # Note: In full implementation, would need equity curve data
             # For V1, we skip detailed drawdown check on new orders;
@@ -257,9 +289,16 @@ class HardRiskEngine:
             # Turnover check (simplified)
             # Cash reserve check
             if self.active_policy.min_cash_reserve_pct > 0:
-                equity = current_cash + sum(abs(pos.market_value) for pos in positions.values())
+                current_gross = sum(abs(getattr(pos, "market_value", pos)) for pos in positions.values())
+                order_notional = order.quantity * (order.price or 0.0)
+                projected_cash = current_cash
+                if order.side.name == "BUY":
+                    projected_cash -= order_notional + self.active_policy.commission_per_order
+                else:
+                    projected_cash += order_notional - self.active_policy.commission_per_order
+                equity = projected_cash + current_gross + (proposed_notional if order.side.name == "BUY" else 0.0)
                 if equity > 0:
-                    reserve_pct = (current_cash / equity) * 100
+                    reserve_pct = (projected_cash / equity) * 100
                     if reserve_pct < self.active_policy.min_cash_reserve_pct:
                         self.decision_audit.append(
                             (
@@ -678,7 +717,7 @@ class ReconciliationEngine:
         if beginning_cash is not None:
             internal_ending = beginning_cash + float(internal["cash_delta"])
             cash_difference = internal_ending - snapshot.cash
-            if abs(cash_difference) > 0.01:
+            if not math.isfinite(cash_difference) or abs(cash_difference) > 0.01:
                 differences.append(f"Cash: internal={internal_ending:.2f}, broker={snapshot.cash:.2f}")
 
         if differences:
@@ -691,6 +730,16 @@ class ReconciliationEngine:
                 "operator_resolution_required": True,
                 "incident_id": incident.incident_id,
                 "differences": differences,
+                "cash_difference": cash_difference,
+            }
+        if self.chain.blocks_new_orders:
+            return {
+                "overall_status": "MISMATCH",
+                "matched": False,
+                "blocks_new_orders": True,
+                "operator_resolution_required": True,
+                "incident_id": None,
+                "differences": ["Unresolved reconciliation incident requires operator resolution"],
                 "cash_difference": cash_difference,
             }
         return {
@@ -1060,6 +1109,11 @@ class SessionScheduler:
                 "status": "TRADING_HALTED",
                 "reason": "Reconciliation state blocked pending operator resolution (OPERATOR_RESOLUTION_REQUIRED)",
                 "warnings": [],
+                "blocks_new_orders": True,
+                "operator_resolution_required": True,
+                "incident_id": self.reconciliation.chain.incidents[-1].incident_id
+                if self.reconciliation.chain.incidents
+                else None,
             }
         return self._run_reconciliation(
             beginning_cash=beginning_cash,
@@ -1111,6 +1165,14 @@ class SessionScheduler:
                 "blocks_new_orders": True,
                 "operator_resolution_required": True,
                 "incident_id": result["incident_id"],
+            }
+        if self.reconciliation.chain.blocks_new_orders:
+            self.is_trading_halted = True
+            return {
+                "status": "TRADING_HALTED",
+                "reason": "Reconnect matched state but an unresolved reconciliation incident remains",
+                "blocks_new_orders": True,
+                "operator_resolution_required": True,
             }
         self.startup_reconciliation_done = True
         self.is_trading_halted = False
@@ -1232,6 +1294,8 @@ class SessionScheduler:
             warnings.append(f"{source} reconciliation: no order state to reconcile")
 
         failures = [message for approved, message in checks if not approved]
+        if source in {"startup", "reconnect"} and warnings:
+            failures.extend(warnings)
         if failures:
             incident = self.reconciliation.chain.trigger(failures, source=source)
             self.is_trading_halted = True
@@ -1243,6 +1307,16 @@ class SessionScheduler:
                 "blocks_new_orders": True,
                 "operator_resolution_required": True,
                 "incident_id": incident.incident_id,
+            }
+        if self.reconciliation.chain.blocks_new_orders:
+            self.is_trading_halted = True
+            return {
+                "status": "TRADING_HALTED",
+                "reason": "Unresolved reconciliation incident requires operator resolution",
+                "details": [message for _, message in checks],
+                "warnings": warnings,
+                "blocks_new_orders": True,
+                "operator_resolution_required": True,
             }
         if source == "startup":
             self.startup_reconciliation_done = True
@@ -1265,6 +1339,12 @@ class SessionScheduler:
             return {
                 "status": "TRADING_HALTED",
                 "reason": "Market closed or calendar data invalid",
+            }
+        if self.reconciliation.chain.blocks_new_orders:
+            self.is_trading_halted = True
+            return {
+                "status": "TRADING_HALTED",
+                "reason": "Unresolved reconciliation incident requires operator resolution",
             }
         self.is_trading_halted = False
         return {"status": "TRADING_RESUMED", "reason": "Market open, calendar valid"}

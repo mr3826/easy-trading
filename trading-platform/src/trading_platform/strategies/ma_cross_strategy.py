@@ -99,9 +99,13 @@ def generate_signal(
 
     # Point-in-time history: no bar after as_of may influence the decision
     if as_of is not None:
-        history = [b for b in bars[symbol] if b["timestamp"] <= as_of]
+        history = [
+            b
+            for b in bars[symbol]
+            if b["timestamp"] <= as_of and (b.get("available_at") is None or b["available_at"] <= as_of)
+        ]
     else:
-        history = list(bars[symbol])
+        history = [b for b in bars[symbol] if b.get("available_at") is None or b["available_at"] <= b["timestamp"]]
 
     today_bars = [b for b in history if b["timestamp"].date() == current_date]
     if not today_bars:

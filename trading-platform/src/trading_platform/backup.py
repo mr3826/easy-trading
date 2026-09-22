@@ -13,7 +13,9 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import tarfile
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -158,13 +160,29 @@ def restore_backup(
             raise ValueError(f"unsafe archive member name: {name}")
     if set(expected_files) != set(contents):
         raise ValueError("archive contents do not match manifest")
-    dest.mkdir(parents=True, exist_ok=True)
-    rebuilt: list[Path] = []
-    for name, entry in sorted(expected_files.items()):
-        data = contents[name]
-        if len(data) != int(str(entry["size"])) or hashlib.sha256(data).hexdigest() != str(entry["sha256"]):
-            raise ValueError(f"archive member {name} failed checksum verification")
-        target = dest / name
-        target.write_bytes(data)
-        rebuilt.append(target)
-    return rebuilt
+    if dest.exists():
+        if dest.is_symlink() or getattr(dest.stat(), "st_reparse_tag", False):
+            raise ValueError("restore destination is a symlink or reparse point")
+        if not dest.is_dir() or any(dest.iterdir()):
+            raise ValueError("restore destination must be a new or empty directory")
+    parent = dest.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{dest.name}.restore-", dir=parent))
+    try:
+        rebuilt: list[Path] = []
+        for name, entry in sorted(expected_files.items()):
+            data = contents[name]
+            if len(data) != int(str(entry["size"])) or hashlib.sha256(data).hexdigest() != str(entry["sha256"]):
+                raise ValueError(f"archive member {name} failed checksum verification")
+            target = staging / name
+            if target.exists() or target.is_symlink() or getattr(target.parent.stat(), "st_reparse_tag", False):
+                raise ValueError(f"restore target is unsafe: {name}")
+            target.write_bytes(data)
+            rebuilt.append(dest / name)
+        if dest.exists():
+            dest.rmdir()
+        os.replace(staging, dest)
+        return rebuilt
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise

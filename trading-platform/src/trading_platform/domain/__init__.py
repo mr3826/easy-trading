@@ -149,6 +149,7 @@ class RiskDecision:
     position_notional: float | None = None
     risk_violation: str | None = None
     approved_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    policy_version: str | None = None
 
 
 @dataclass(frozen=False)

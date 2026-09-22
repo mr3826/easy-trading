@@ -188,6 +188,7 @@ class WalkForwardEvaluator:
     ):
         self.simulator = simulator
         self.hypothesis = hypothesis
+        self.simulator.max_positions = hypothesis.max_positions
         self.period_split = period_split
         self.registry = registry
         self.verify_determinism = verify_determinism
@@ -246,6 +247,7 @@ class WalkForwardEvaluator:
             # Cost/slippage
             "test_total_commission": test_metrics["commission"],
             "test_total_slippage": test_metrics["slippage"],
+            "test_estimated_slippage": test_metrics["estimated_slippage"],
             # Robustness analysis
             "test_turnover": test_metrics["turnover"],
             "test_max_drawdown": test_metrics["max_drawdown"],
@@ -305,6 +307,7 @@ class WalkForwardEvaluator:
                     "low": b.low,
                     "close": b.close,
                     "volume": b.volume,
+                    "available_at": b.available_at,
                 }
                 for b in full_history
             ]
@@ -367,6 +370,12 @@ class WalkForwardEvaluator:
         timestamp = datetime.fromisoformat(timestamp_value) if isinstance(timestamp_value, str) else timestamp_value
         if timestamp.tzinfo is None:
             timestamp = timestamp.replace(tzinfo=timezone.utc)
+        available_at_value = raw_bar.get("available_at")
+        available_at = (
+            datetime.fromisoformat(available_at_value) if isinstance(available_at_value, str) else available_at_value
+        )
+        if available_at is not None and available_at.tzinfo is None:
+            available_at = available_at.replace(tzinfo=timezone.utc)
         return Bar(
             instrument=instrument,
             timestamp=timestamp,
@@ -375,6 +384,7 @@ class WalkForwardEvaluator:
             low=float(raw_bar["low"]),
             close=float(raw_bar["close"]),
             volume=int(raw_bar["volume"]),
+            available_at=available_at,
         )
 
     def _aggregate_phase(self, outcome: Dict[str, Any]) -> Dict[str, Any]:
@@ -409,6 +419,14 @@ class WalkForwardEvaluator:
             "trade_count": sum(len(result.trade_ledger) for result in results),
             "commission": sum(result.total_commission for result in results),
             "slippage": sum(result.total_slippage for result in results),
+            "estimated_slippage": sum(
+                abs(int((event.detail or {}).get("fill_quantity", 0)))
+                * float((event.detail or {}).get("fill_price", 0.0))
+                * self.hypothesis.slippage_pct
+                for result in results
+                for event in result.trade_ledger
+                if event.event_type == "FILL"
+            ),
             "trade_pnls": trade_pnls,
             "turnover": compute_turnover(total_buy, total_sell, equity=self.simulator.start_cash),
             "max_drawdown": compute_max_drawdown(equity_curve),
@@ -556,13 +574,30 @@ class WalkForwardEvaluator:
                     commission_per_order=self.hypothesis.commission_per_order * cm,
                     slippage_pct=self.hypothesis.slippage_pct,
                 )
+                variant_simulator = EventDrivenSimulator(
+                    mode=self.simulator.mode,
+                    commission_model=self.simulator.commission_model,
+                    commission_rate=self.simulator.commission_rate * cm,
+                    start_cash=self.simulator.start_cash,
+                    fill_assumption=self.simulator.fill_assumption,
+                    seed=self.simulator.seed,
+                    max_positions=self.simulator.max_positions,
+                )
                 variant_evaluator = WalkForwardEvaluator(
-                    self.simulator, variant_hypothesis, self.period_split, self.registry, verify_determinism=False
+                    variant_simulator,
+                    variant_hypothesis,
+                    self.period_split,
+                    self.registry,
+                    verify_determinism=False,
                 )
                 for idx, fold in enumerate(folds):
                     variant_evaluator.run_fold(idx, fold, bars_by_symbol, symbols)
 
-                pnl = sum(r["test_total_pnl"] for r in variant_evaluator.fold_results)
+                raw_pnl = sum(r["test_total_pnl"] for r in variant_evaluator.fold_results)
+                estimated_slippage = (
+                    sum(r.get("test_estimated_slippage", 0.0) for r in variant_evaluator.fold_results) * sm
+                )
+                pnl = raw_pnl - estimated_slippage
 
                 scenarios.append(
                     {
@@ -570,6 +605,7 @@ class WalkForwardEvaluator:
                         "slippage_multiplier": sm,
                         "test_total_pnl": round(pnl, 2),
                         "delta_vs_base": round(pnl - base_pnl, 2),
+                        "estimated_slippage": round(estimated_slippage, 2),
                     }
                 )
 

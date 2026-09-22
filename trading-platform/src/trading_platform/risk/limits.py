@@ -107,6 +107,7 @@ def check_sector_concentration(
 def check_gross_exposure(
     current_positions: Dict[str, Position],
     gross_limit: float = 1_000_000.0,  # V1 PROVISIONAL: $1M notional gross
+    proposed_notional: float = 0.0,
 ) -> Tuple[bool, str]:
     """Check gross exposure limit.
 
@@ -114,7 +115,7 @@ def check_gross_exposure(
 
     Returns (approved, reason).
     """
-    total_gross = sum(abs(pos.market_value) for pos in current_positions.values())
+    total_gross = sum(abs(pos.market_value) for pos in current_positions.values()) + max(proposed_notional, 0.0)
 
     if total_gross > gross_limit:
         return (

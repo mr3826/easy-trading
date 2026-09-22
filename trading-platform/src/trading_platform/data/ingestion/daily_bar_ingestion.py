@@ -156,8 +156,9 @@ class DailyBarIngestion:
         if self.corporate_action_provider is not None:
             splits = self.corporate_action_provider.get_splits(instrument, start, end)
             dividends = self.corporate_action_provider.get_dividends(instrument, start, end)
-            valid_bars = apply_split_adjustment(valid_bars, splits, end)
-            valid_bars = apply_dividend_adjustment(valid_bars, dividends, end)
+            reference_timestamp = as_of or end
+            valid_bars = apply_split_adjustment(valid_bars, splits, reference_timestamp)
+            valid_bars = apply_dividend_adjustment(valid_bars, dividends, reference_timestamp)
 
         metadata = self.data_provider.get_metadata(instrument)
 

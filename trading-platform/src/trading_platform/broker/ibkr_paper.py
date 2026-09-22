@@ -17,6 +17,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from trading_platform.config import load_config
 from trading_platform.domain import (
     BrokerSnapshot,
     Instrument,
@@ -59,11 +60,15 @@ _IB_ORDER_TYPES: Dict[OrderType, str] = {
 }
 
 
-def validate_paper_target(host: str, port: int, account: str = "") -> None:
+def validate_paper_target(host: str, port: int, account: str = "", *, require_account: bool = False) -> None:
     """Raise ValueError unless the target is a verified paper connection."""
     if port in LIVE_PORTS:
         raise ValueError(f"live IBKR port {port} is forbidden; paper ports are 7497 (TWS) or 4002 (Gateway)")
+    if port not in PAPER_PORTS:
+        raise ValueError(f"IBKR paper port {port} is not in the verified paper allowlist")
     if not account:
+        if require_account:
+            raise ValueError("a verified DU paper account is required before connection or submission")
         return
     normalized = account.strip().upper()
     if "LIVE" in normalized:
@@ -118,6 +123,8 @@ class IBKRPaperBrokerAdapter:
     ) -> None:
         if not paper:
             raise ValueError("IBKR adapter accepts paper configuration only")
+        if not isinstance(allow_connection, bool) or not isinstance(allow_paper_orders, bool):
+            raise TypeError("IBKR paper authorization flags must be booleans")
         if allow_paper_orders and not allow_connection:
             raise ValueError("allow_paper_orders requires allow_connection")
         validate_paper_target(host, port, account)
@@ -164,6 +171,7 @@ class IBKRPaperBrokerAdapter:
         under the same order id. Raises RuntimeError unless both gate flags
         are set and the client handshake is established."""
         self._require_submission_allowed()
+        self._require_risk_approval(order)
         existing = self._orders.get(order.order_id)
         if existing is not None:
             return self._replace(order, existing, stop_price)
@@ -184,6 +192,7 @@ class IBKRPaperBrokerAdapter:
         stop-loss protective legs sharing an OCA group. Raises RuntimeError
         under the same conditions as execute_order."""
         self._require_submission_allowed()
+        self._require_risk_approval(order)
         if order.price is None:
             raise ValueError(f"bracket entry {order.order_id} requires a limit price")
         ib = self._ensure_client()
@@ -364,12 +373,13 @@ class IBKRPaperBrokerAdapter:
         recorded) unless allow_connection is set, the target is verified
         paper, and the client handshake succeeds."""
         if self.connected:
-            return True
+            self._error = "pre-connected IBKR clients are forbidden; server identity must be verified by this adapter"
+            return False
         if not self._allow_connection:
             self._error = "connection is not allowed; set allow_connection to enable IBKR paper connectivity"
             return False
         try:
-            validate_paper_target(self._host, self._port, self._account)
+            validate_paper_target(self._host, self._port, self._account, require_account=True)
             ib = self._ensure_client()
             self._register_handlers_once(ib)
             ib.connect(self._host, self._port, self._client_id, self._connect_timeout, False, self._account)
@@ -458,6 +468,18 @@ class IBKRPaperBrokerAdapter:
             )
         if not self.connected:
             raise RuntimeError("IBKR paper submission blocked: IBKR client is not connected")
+        validate_paper_target(self._host, self._port, self._account, require_account=True)
+        runtime = load_config()
+        if runtime.live_trading_enabled or runtime.live_status != "NOT_AUTHORIZED":
+            raise RuntimeError("IBKR submission blocked by the global live-trading kill switch")
+
+    @staticmethod
+    def _require_risk_approval(order: Order) -> None:
+        decision = order.risk_decision
+        if decision is None or not decision.approved:
+            raise RuntimeError("IBKR paper submission requires an approved risk decision")
+        if decision.order_intent.order_id != order.order_id or not decision.policy_version:
+            raise RuntimeError("IBKR paper submission requires a matching policy-versioned risk decision")
 
     # --- Order mapping ---
 

@@ -38,12 +38,15 @@ from trading_platform.data.ingestion.daily_bar_ingestion import (
 from trading_platform.dead_man import heartbeat_is_fresh
 from trading_platform.domain import (
     Bar,
+    BrokerSnapshot,
     Instrument,
     Order,
+    OrderIntent,
     OrderSide,
     OrderStatus,
     OrderType,
     Position,
+    RiskDecision,
     Signal,
     TimeInForce,
 )
@@ -104,8 +107,10 @@ def make_bar(symbol: str = "AAPL", day: int = 1, opening: float = 100.0) -> Bar:
 def make_order(price: float | None = 100.0, symbol: str = "AAPL", quantity: int = 1) -> Order:
     instrument = Instrument(symbol)
     signal = Signal(instrument, OrderSide.BUY, quantity, price, OrderType.LIMIT, TimeInForce.DAY)
+    order_id = f"order-{symbol}-{quantity}-{price}"
+    intent = OrderIntent(signal=signal, order_id=order_id)
     return Order(
-        f"order-{symbol}-{quantity}-{price}",
+        order_id,
         instrument,
         OrderSide.BUY,
         quantity,
@@ -114,6 +119,7 @@ def make_order(price: float | None = 100.0, symbol: str = "AAPL", quantity: int 
         TimeInForce.DAY,
         OrderStatus.SUBMITTED,
         signal,
+        risk_decision=RiskDecision(intent, True, reason="test approval", policy_version="test-v1"),
     )
 
 
@@ -245,16 +251,16 @@ def test_risk_limits_and_hard_controls() -> None:
     assert not limits.check_cash_reserve(10, 1000)[0]
 
     engine = HardRiskEngine([RiskPolicyVersion(1, max_positions=1, max_gross_exposure=5000, min_cash_reserve_pct=0)])
-    approved, _, policy = engine.check_order(make_order(), {}, 1000)
+    approved, _, policy = engine.check_order(make_order(), {}, 1000, starting_cash=1000)
     assert approved and policy is not None
     engine.disable_symbol("AAPL")
-    assert not engine.check_order(make_order(100.0, "AAPL"), {}, 1000)[0]
+    assert not engine.check_order(make_order(100.0, "AAPL"), {}, 1000, starting_cash=1000)[0]
     engine.disabled_symbols.clear()
     engine.block_new_positions()
-    assert not engine.check_order(make_order(), {}, 1000)[0]
+    assert not engine.check_order(make_order(), {}, 1000, starting_cash=1000)[0]
     engine.new_positions_blocked = False
     engine.disable_all_submissions()
-    assert not engine.check_order(make_order(), {}, 1000)[0]
+    assert not engine.check_order(make_order(), {}, 1000, starting_cash=1000)[0]
     assert not HardRiskEngine().check_order(make_order(), {}, 1000)[0]
 
 
@@ -390,7 +396,7 @@ def test_oms_negative_paths_replacement_timeout_and_price_modes() -> None:
     assert replacement_oms.submit_order(old, "replace-key")[0]
     assert replacement_oms.accept_order(old.order_id)
     assert replacement_oms.open_order(old.order_id)
-    assert replacement_oms.submit_order(replacement, "replace-key")[0]
+    assert replacement_oms.replace_order(old.order_id, replacement, "replace-key")[0]
     assert replacement_oms.get_order_status(old.order_id) == "CANCELLED"
     assert replacement_oms.get_order_status(replacement.order_id) == "SUBMITTED"
     assert replacement_oms.list_oca_groups()
@@ -446,7 +452,19 @@ def test_reconciliation_scheduler_and_monitor() -> None:
     comparison = recon.compare_session_to_simulation({"metrics": {}}, {"metrics": {}})
     assert comparison["overall_match"]
     scheduler = SessionScheduler(HardRiskEngine(), recon)
-    assert scheduler.startup()["status"] == "STARTUP_OK"
+    assert (
+        scheduler.startup(
+            beginning_cash=1000.0,
+            expected_ending_cash=1000.0,
+            expected_positions={},
+            actual_positions={},
+            expected_fills=0,
+            actual_fills=0,
+            broker_orders={},
+            broker_snapshot=BrokerSnapshot(datetime.now(UTC), {}, 1000.0, 1000.0),
+        )["status"]
+        == "STARTUP_OK"
+    )
     assert scheduler.should_trade()
     assert scheduler.check_market_calendar(False, True)["status"] == "TRADING_HALTED"
     assert not scheduler.should_trade()

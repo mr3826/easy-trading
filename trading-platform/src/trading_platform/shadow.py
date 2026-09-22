@@ -20,6 +20,7 @@ from trading_platform.domain import (
     Bar,
     Instrument,
     Order,
+    OrderSide,
     OrderStatus,
     OrderType,
     Signal,
@@ -187,6 +188,7 @@ class ShadowOrchestrator:
         self.db_sinks = tuple(db_sinks)
         self.positions: dict[str, Any] = dict(positions) if positions else {}
         self.cash = cash
+        self.initial_cash = cash
         self.now_fn: Callable[[], datetime] = now_fn or (lambda: datetime.now(timezone.utc))
         self.freshness_limit_seconds = freshness_limit_seconds
         self.bar_interval_seconds = bar_interval_seconds
@@ -228,6 +230,16 @@ class ShadowOrchestrator:
         valid, message = validate_bar(bar)
         if not valid:
             problem = DataProblem(PROBLEM_INVALID, bar.instrument.symbol, timestamp, message or "bar failed validation")
+            self._persist_problem(problem)
+            problems.append(problem)
+            return problem
+        if bar.available_at is not None and bar.available_at > bar.timestamp:
+            problem = DataProblem(
+                PROBLEM_INVALID,
+                bar.instrument.symbol,
+                timestamp,
+                "bar became available after its decision timestamp",
+            )
             self._persist_problem(problem)
             problems.append(problem)
             return problem
@@ -286,7 +298,18 @@ class ShadowOrchestrator:
             status=OrderStatus.SUBMITTED,
             signal=signal,
         )
-        approved, reason, policy = self.risk_engine.check_order(order, self.positions, self.cash)
+        try:
+            approved, reason, policy = self.risk_engine.check_order(
+                order,
+                self.positions,
+                self.cash,
+                starting_cash=self.initial_cash,
+                daily_loss=0.0,
+            )
+        except TypeError as exc:
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            approved, reason, policy = self.risk_engine.check_order(order, self.positions, self.cash)
         record: dict[str, Any] = {
             "symbol": bar.instrument.symbol,
             "action": ACTION_WOULD_SUBMIT if approved else ACTION_RISK_REJECTED,
@@ -303,6 +326,15 @@ class ShadowOrchestrator:
             self.archive.record_shadow_decision(record)
             for sink in self.db_sinks:
                 sink.record_shadow_decision(record)
+        if approved:
+            current = self.positions.get(bar.instrument.symbol, 0)
+            current_quantity = int(getattr(current, "quantity", current if isinstance(current, (int, float)) else 0))
+            if signal.side == OrderSide.BUY:
+                self.positions[bar.instrument.symbol] = current_quantity + signal.quantity
+                self.cash -= signal.quantity * bar.close
+            else:
+                self.positions[bar.instrument.symbol] = current_quantity - signal.quantity
+                self.cash += signal.quantity * bar.close
         return record
 
     def run(self, instrument: Instrument, start: datetime, end: datetime) -> ShadowRunResult:

@@ -20,6 +20,7 @@ Key features:
 
 from __future__ import annotations
 
+import math
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional
@@ -96,7 +97,8 @@ class OCAGroup:
     def cancel_all(self) -> None:
         """Cancel all orders in the group."""
         for order in self.orders.values():
-            order.status = OrderLifecycle.CANCELED
+            if order.status in FILLABLE_STATUSES:
+                order.status = OrderLifecycle.CANCELED
         self.orders.clear()
 
     def replace_all(self, new_order: Order) -> None:
@@ -144,6 +146,7 @@ class OMS:
         oms_id: str = "default_oms",
         on_fill_reconcile: Callable[[Mapping[str, Any]], object] | None = None,
         require_protective_orders: bool = False,
+        require_risk_approval: bool = True,
     ) -> None:
         self.oms_id = oms_id
         # Order state: order_id -> Order
@@ -161,6 +164,7 @@ class OMS:
         # Protective (stop-loss) order links: position symbol -> protective order id
         self.protective_orders: Dict[str, str] = {}
         self.require_protective_orders = require_protective_orders
+        self.require_risk_approval = require_risk_approval
         self.on_fill_reconcile = on_fill_reconcile
 
     # ---- Order submission ----
@@ -189,6 +193,17 @@ class OMS:
                 f"Duplicate submission: order {order.order_id} already {existing.status.name}",
             )
 
+        if self.require_risk_approval:
+            decision = order.risk_decision
+            if decision is None:
+                return False, "Risk approval required before OMS submission"
+            if not decision.approved:
+                return False, f"Risk approval rejected: {decision.reason or 'order not approved'}"
+            if decision.order_intent.order_id != order.order_id:
+                return False, "Risk approval does not match order intent"
+            if not decision.policy_version:
+                return False, "Risk approval must include a policy version"
+
         if idempotency_key and idempotency_key in self.idempotency_keys:
             existing_order_id = self.idempotency_keys[idempotency_key]
             existing_order = self.orders.get(existing_order_id)
@@ -198,7 +213,10 @@ class OMS:
                     f"Order already {existing_order.status.name} with same idempotency key",
                 )
             if existing_order and existing_order.status == OrderLifecycle.OPEN:
-                return self.replace_order(existing_order.order_id, order, idempotency_key)
+                return (
+                    False,
+                    f"Duplicate idempotency key for open order {existing_order_id}; use replace_order explicitly",
+                )
             return (
                 False,
                 f"Duplicate submission: order {existing_order_id} already "
@@ -309,15 +327,25 @@ class OMS:
         """
         order = self.orders.get(order_id)
         if not order:
+            self._record_fill_incident(
+                "UNKNOWN_ORDER_FILL",
+                order_id,
+                execution_id=execution_id,
+                fill_quantity=fill_quantity,
+                fill_price=fill_price,
+            )
             return False
 
-        if execution_id and execution_id in self.fill_execution_ids:
+        implicit_execution_id = execution_id or (
+            f"implicit:{order_id}:{fill_quantity}:{fill_price}:{commission}:{slippage}"
+        )
+        if implicit_execution_id in self.fill_execution_ids:
             self.event_ledger.append(
                 {
                     "event": "DUPLICATE_FILL_DETECTED",
                     "order_id": order_id,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "execution_id": execution_id,
+                    "execution_id": implicit_execution_id,
                     "fill_quantity": fill_quantity,
                     "fill_price": fill_price,
                 }
@@ -332,7 +360,7 @@ class OMS:
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "status": order.status.name,
                     "severity": "CRITICAL",
-                    "execution_id": execution_id,
+                    "execution_id": implicit_execution_id,
                     "fill_quantity": fill_quantity,
                     "fill_price": fill_price,
                 }
@@ -340,6 +368,32 @@ class OMS:
             return False
 
         if order.status not in FILLABLE_STATUSES:
+            self._record_fill_incident(
+                "OUT_OF_ORDER_FILL",
+                order_id,
+                execution_id=implicit_execution_id,
+                status=order.status.name,
+            )
+            return False
+
+        if (
+            fill_quantity <= 0
+            or not math.isfinite(fill_price)
+            or fill_price <= 0
+            or not math.isfinite(commission)
+            or commission < 0
+            or not math.isfinite(slippage)
+            or slippage < 0
+        ):
+            self._record_fill_incident(
+                "INVALID_FILL_REJECTED",
+                order_id,
+                execution_id=implicit_execution_id,
+                fill_quantity=fill_quantity,
+                fill_price=fill_price,
+                commission=commission,
+                slippage=slippage,
+            )
             return False
 
         remaining = order.quantity - (order.filled_quantity or 0)
@@ -352,7 +406,7 @@ class OMS:
                     "status": order.status.name,
                     "requested": fill_quantity,
                     "remaining": remaining,
-                    "execution_id": execution_id,
+                    "execution_id": implicit_execution_id,
                 }
             )
             return False
@@ -407,14 +461,26 @@ class OMS:
             "fill_average_price": order.average_fill_price,
             "commission": commission,
             "slippage": slippage,
-            "execution_id": execution_id,
+            "execution_id": implicit_execution_id,
         }
         self.event_ledger.append(event)
-        if execution_id:
-            self.fill_execution_ids.add(execution_id)
+        self.fill_execution_ids.add(implicit_execution_id)
         if self.on_fill_reconcile is not None:
             self.on_fill_reconcile(event)
         return True
+
+    def _record_fill_incident(self, event_name: str, order_id: str, **details: Any) -> None:
+        """Record a fill anomaly and notify reconciliation without dropping it."""
+        event = {
+            "event": event_name,
+            "order_id": order_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "severity": "CRITICAL",
+            **details,
+        }
+        self.event_ledger.append(event)
+        if self.on_fill_reconcile is not None:
+            self.on_fill_reconcile(event)
 
     # ---- Order cancellation ----
 
@@ -509,6 +575,14 @@ class OMS:
                 "old_order_id": old_order_id,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "status": new_order.status.name,
+                "instrument": new_order.instrument.symbol,
+                "side": new_order.side.name,
+                "quantity": new_order.quantity,
+                "price": new_order.price,
+                "order_type": new_order.order_type.name,
+                "time_in_force": new_order.time_in_force.name,
+                "idempotency_key": idempotency_key,
+                "oca_group": group_id or new_order.order_id,
             }
         )
         return True, "Order replaced"
@@ -651,6 +725,15 @@ class OMS:
             OrderType.STOP_LIMIT,
         ):
             return False
+        if protective.instrument.symbol != symbol:
+            return False
+        if protective.status not in {
+            OrderLifecycle.SUBMITTED,
+            OrderLifecycle.ACCEPTED,
+            OrderLifecycle.OPEN,
+            OrderLifecycle.PARTIALLY_FILLED,
+        }:
+            return False
         self.protective_orders[symbol] = protective_order_id
         self.event_ledger.append(
             {
@@ -664,14 +747,40 @@ class OMS:
 
     def unlink_protective_order(self, symbol: str) -> None:
         """Remove the protective link when the position is closed."""
-        self.protective_orders.pop(symbol, None)
+        protective_order_id = self.protective_orders.pop(symbol, None)
+        if protective_order_id is not None:
+            self.event_ledger.append(
+                {
+                    "event": "PROTECTIVE_ORDER_UNLINKED",
+                    "symbol": symbol,
+                    "protective_order_id": protective_order_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
 
     def check_protective_invariant(self, held_positions: Iterable[str]) -> tuple[bool, str]:
         """Every held position must have a linked protective (stop-loss) order.
 
         Returns (satisfied, reason).
         """
-        missing = [symbol for symbol in held_positions if symbol not in self.protective_orders]
+        missing = []
+        for symbol in held_positions:
+            protective_id = self.protective_orders.get(symbol)
+            protective = self.orders.get(protective_id) if protective_id else None
+            if (
+                protective is None
+                or protective.instrument.symbol != symbol
+                or protective.side != OrderSide.SELL
+                or protective.order_type not in (OrderType.STOP, OrderType.STOP_LIMIT)
+                or protective.status
+                not in {
+                    OrderLifecycle.SUBMITTED,
+                    OrderLifecycle.ACCEPTED,
+                    OrderLifecycle.OPEN,
+                    OrderLifecycle.PARTIALLY_FILLED,
+                }
+            ):
+                missing.append(symbol)
         if missing:
             return (
                 False,
@@ -743,6 +852,9 @@ class OMS:
             if replacement_id and replacement_id not in self.orders:
                 replacement = self._order_from_event(event, str(replacement_id), OrderStatus.SUBMITTED)
                 self.orders[str(replacement_id)] = replacement
+                key = event.get("idempotency_key")
+                if key:
+                    self.idempotency_keys[str(key)] = str(replacement_id)
                 gid = event.get("oca_group")
                 if gid:
                     group = self.oca_groups.setdefault(str(gid), OCAGroup(str(gid)))
@@ -752,6 +864,10 @@ class OMS:
             protective_id = event.get("protective_order_id")
             if symbol and protective_id:
                 self.protective_orders[symbol] = str(protective_id)
+        elif kind == "PROTECTIVE_ORDER_UNLINKED":
+            symbol = str(event.get("symbol", ""))
+            if symbol:
+                self.protective_orders.pop(symbol, None)
         self.event_ledger.append(event)
 
     def _append_replay_gap(self, event: Mapping[str, Any]) -> None:

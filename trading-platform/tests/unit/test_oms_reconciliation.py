@@ -11,10 +11,12 @@ from trading_platform.domain import (
     BrokerSnapshot,
     Instrument,
     Order,
+    OrderIntent,
     OrderSide,
     OrderStatus,
     OrderType,
     Position,
+    RiskDecision,
     Signal,
     TimeInForce,
 )
@@ -40,8 +42,19 @@ def make_order(
 ) -> Order:
     instrument = Instrument(symbol)
     signal = Signal(instrument, side, quantity, price, order_type, TimeInForce.DAY)
+    intent = OrderIntent(signal=signal, order_id=order_id)
+    risk = RiskDecision(intent, approved=True, reason="test approval", policy_version="test-v1")
     return Order(
-        order_id, instrument, side, quantity, price, order_type, TimeInForce.DAY, OrderStatus.SUBMITTED, signal
+        order_id,
+        instrument,
+        side,
+        quantity,
+        price,
+        order_type,
+        TimeInForce.DAY,
+        OrderStatus.SUBMITTED,
+        signal,
+        risk_decision=risk,
     )
 
 
@@ -273,22 +286,19 @@ def test_reconcile_cash_derives_fees_from_durable_ledger() -> None:
 def test_internal_snapshot_matches_independent_broker_snapshot() -> None:
     oms = OMS("indep")
     recon = ReconciliationEngine(oms)
-    broker = FakeBroker(oms, "NEXT_OPEN")
     beginning_cash = 10_000.0
-    executions: list[dict[str, Any]] = []
-    for index in range(2):
-        order = make_order(f"o-{index}", quantity=5, price=None)
-        oms.submit_order(order)
-        executions.append(broker.execute_order(order, make_bar("AAPL", opening=100.0 + index)))
-
     independent_positions: dict[str, float] = {}
     independent_cash = beginning_cash
-    for execution in executions:
-        quantity = float(execution["quantity"])
-        delta = -quantity if execution["side"] == "SELL" else quantity
-        independent_positions[execution["symbol"]] = independent_positions.get(execution["symbol"], 0.0) + delta
-        independent_cash -= delta * float(execution["fill_price"])
-        independent_cash -= float(execution["commission"]) + float(execution["slippage"])
+    for index in range(2):
+        fill_price = 100.0 + index
+        order = make_order(f"o-{index}", quantity=5, price=None)
+        oms.submit_order(order)
+        open_order_in_oms(oms, order.order_id)
+        oms.fill_order(order.order_id, 5, fill_price, execution_id=f"independent-{index}", commission=1.0)
+        # Independent broker ledger: deliberately maintained from a separate
+        # fill feed, not from OMS execution dictionaries or OMS state.
+        independent_positions["AAPL"] = independent_positions.get("AAPL", 0.0) + 5.0
+        independent_cash -= 5.0 * fill_price + 1.0
 
     snapshot = broker_snapshot(independent_positions, independent_cash)
     result = recon.reconcile_against_snapshot(snapshot, beginning_cash=beginning_cash)
@@ -335,7 +345,7 @@ def test_fail_closed_chain_wires_incident_alert_and_resolution() -> None:
     assert recon.blocks_new_orders
     assert recon.resolve("operator", "acknowledged")
     assert not recon.blocks_new_orders
-    approved_again, _reason_again, _policy_again = engine.check_order(order, {}, 1000.0)
+    approved_again, _reason_again, _policy_again = engine.check_order(order, {}, 1000.0, starting_cash=1000.0)
     assert approved_again
 
 
@@ -358,11 +368,19 @@ def test_startup_uses_real_durable_inputs_and_fails_closed() -> None:
     scheduler = SessionScheduler(HardRiskEngine(), recon)
 
     plain = scheduler.startup()
-    assert plain["status"] == "STARTUP_OK"
+    assert plain["status"] == "TRADING_HALTED"
     assert plain["warnings"]
 
-    matched = scheduler.startup(
-        beginning_cash=10_000.0, expected_ending_cash=10_000.0, expected_fills=0, broker_orders={}
+    matched_scheduler = SessionScheduler(HardRiskEngine(), ReconciliationEngine(OMS("startup-matched")))
+    matched = matched_scheduler.startup(
+        beginning_cash=10_000.0,
+        expected_ending_cash=10_000.0,
+        expected_positions={},
+        actual_positions={},
+        expected_fills=0,
+        actual_fills=0,
+        broker_orders={},
+        broker_snapshot=broker_snapshot({}, 10_000.0),
     )
     assert matched["status"] == "STARTUP_OK"
 
@@ -494,11 +512,11 @@ def test_oms_protective_order_invariant_and_risk_check() -> None:
     engine = HardRiskEngine([RiskPolicyVersion(1, min_cash_reserve_pct=0)], oms=oms)
     oms.unlink_protective_order("AAPL")
     buy = make_order("o-buy", quantity=1, price=100.0)
-    rejected, reason, _policy = engine.check_order(buy, {}, 1000.0)
+    rejected, reason, _policy = engine.check_order(buy, {}, 1000.0, starting_cash=1000.0)
     assert not rejected
     assert "Protective" in reason
     oms.link_protective_order("AAPL", "o-stop")
-    approved_again, _reason_again, _policy_again = engine.check_order(buy, {}, 1000.0)
+    approved_again, _reason_again, _policy_again = engine.check_order(buy, {}, 1000.0, starting_cash=1000.0)
     assert approved_again
 
     coverage_ok, _message = engine.check_protective_order_coverage(
@@ -601,7 +619,8 @@ def test_replay_covers_cancel_replacement_and_protective_events() -> None:
     order = make_order("o-r1", quantity=5)
     oms.submit_order(order, "idem-r1")
     open_order_in_oms(oms, "o-r1")
-    oms.cancel_order("o-r1", reason="TEST")
+    replacement = make_order("o-r2", quantity=5, price=101.0)
+    assert oms.replace_order("o-r1", replacement, "idem-r2")[0]
     stop = make_order("o-stop", side=OrderSide.SELL, quantity=5, price=95.0, order_type=OrderType.STOP)
     oms.submit_order(stop)
     assert oms.link_protective_order("AAPL", "o-stop")
@@ -610,6 +629,8 @@ def test_replay_covers_cancel_replacement_and_protective_events() -> None:
     rebuilt = OMS("rebuilt-full")
     rebuilt.rebuild_from_ledger(ledger)
     assert rebuilt.get_order_status("o-r1") == "CANCELLED"
+    assert rebuilt.get_order_status("o-r2") == "SUBMITTED"
+    assert rebuilt.get_order("o-r2").price == 101.0
     assert rebuilt.protective_orders == {"AAPL": "o-stop"}
 
     gapped = OMS("gap-open")

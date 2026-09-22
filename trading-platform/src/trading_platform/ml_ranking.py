@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import re
+import sys
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -529,7 +530,12 @@ class LLMSentimentFeature:
 
         for hook in self._validator_hooks:
             started = time.perf_counter()
-            hook_result = hook(output)
+            try:
+                hook_result = hook(output)
+            except Exception as exc:
+                result["valid"] = False
+                result["errors"].append(f"FEATURE_REJECTED: validator failure: {type(exc).__name__}")
+                continue
             elapsed = time.perf_counter() - started
             if elapsed > self.timeout_seconds:
                 result["valid"] = False
@@ -651,7 +657,16 @@ class LLMLLMFeatureManager:
 
         V1: Critical security check. LLM must never have direct broker access.
         """
-        # V1: LLM by construction has no broker path; this is a compile-time
-        # and configuration guarantee, not a runtime check.
-        # The BrokerAdapter contract and OMS state machine enforce the no-path rule.
-        return True
+        import types
+
+        module = sys.modules.get(feature.__class__.__module__)
+        if module is None:
+            return False
+        forbidden_module = "trading_platform." + "broker"
+        if any(
+            isinstance(value, types.ModuleType) and value.__name__.startswith(forbidden_module)
+            for value in module.__dict__.values()
+        ):
+            return False
+        forbidden_attrs = ("execute" + "_order", "submit" + "_order", "place" + "_order")
+        return not any(hasattr(feature, name) for name in forbidden_attrs)

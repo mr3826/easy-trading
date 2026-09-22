@@ -20,12 +20,32 @@ from trading_platform.domain import (
     BrokerSnapshot,
     Instrument,
     Order,
+    OrderIntent,
     OrderSide,
     OrderType,
     TimeInForce,
     Signal,
     OrderStatus,
+    RiskDecision,
 )
+
+
+def approve(order: Order) -> Order:
+    signal = order.signal or Signal(
+        order.instrument,
+        order.side,
+        order.quantity,
+        order.price,
+        order.order_type,
+        order.time_in_force,
+    )
+    order.risk_decision = RiskDecision(
+        OrderIntent(signal=signal, order_id=order.order_id),
+        approved=True,
+        reason="test approval",
+        policy_version="test-v1",
+    )
+    return order
 
 
 @pytest.mark.integration
@@ -41,7 +61,7 @@ def test_oms_state_machine_lifecycle():
         order_type=OrderType.MARKET,
         time_in_force=TimeInForce.DAY,
     )
-    order = Order(
+    order = approve(Order(
         order_id="order-001",
         instrument=inst,
         side=OrderSide.BUY,
@@ -51,7 +71,7 @@ def test_oms_state_machine_lifecycle():
         time_in_force=TimeInForce.DAY,
         status=OrderStatus.SUBMITTED,
         signal=signal,
-    )
+    ))
     # Submit order
     result = oms.submit_order(order)
     order1_id = order.order_id  # Use the order's own ID
@@ -87,7 +107,7 @@ def test_oms_idempotency():
         order_type=OrderType.MARKET,
         time_in_force=TimeInForce.DAY,
     )
-    order = Order(
+    order = approve(Order(
         order_id="order-001",
         instrument=inst,
         side=OrderSide.BUY,
@@ -97,7 +117,7 @@ def test_oms_idempotency():
         time_in_force=TimeInForce.DAY,
         status=OrderStatus.SUBMITTED,
         signal=signal,
-    )
+    ))
 
     result = oms.submit_order(order)
     order1_id = order.order_id
@@ -110,7 +130,7 @@ def test_oms_idempotency():
     assert len(oms.orders) == 1
     assert oms.get_order_status(order1_id) == "SUBMITTED"
 
-    keyed = Order(
+    keyed = approve(Order(
         order_id="order-002",
         instrument=inst,
         side=OrderSide.BUY,
@@ -120,11 +140,11 @@ def test_oms_idempotency():
         time_in_force=TimeInForce.DAY,
         status=OrderStatus.SUBMITTED,
         signal=signal,
-    )
+    ))
     keyed_result = oms.submit_order(keyed, "idem-key-1")
     assert keyed_result[0] is True
 
-    conflicting = Order(
+    conflicting = approve(Order(
         order_id="order-003",
         instrument=inst,
         side=OrderSide.BUY,
@@ -134,7 +154,7 @@ def test_oms_idempotency():
         time_in_force=TimeInForce.DAY,
         status=OrderStatus.SUBMITTED,
         signal=signal,
-    )
+    ))
     conflicting_result = oms.submit_order(conflicting, "idem-key-1")
     assert conflicting_result[0] is False
     assert "Duplicate submission" in conflicting_result[1]
@@ -155,7 +175,7 @@ def test_oca_group():
         order_type=OrderType.MARKET,
         time_in_force=TimeInForce.DAY,
     )
-    order_a = Order(
+    order_a = approve(Order(
         order_id="oca-a",
         instrument=inst,
         side=OrderSide.BUY,
@@ -165,8 +185,8 @@ def test_oca_group():
         time_in_force=TimeInForce.DAY,
         status=OrderStatus.SUBMITTED,
         signal=signal,
-    )
-    order_b = Order(
+    ))
+    order_b = approve(Order(
         order_id="oca-b",
         instrument=inst,
         side=OrderSide.SELL,
@@ -176,7 +196,7 @@ def test_oca_group():
         time_in_force=TimeInForce.DAY,
         status=OrderStatus.SUBMITTED,
         signal=signal,
-    )
+    ))
     oca = OCAGroup(group_id="oca-demo-001")
     oca.add(order_a)
     oca.add(order_b)
@@ -209,7 +229,7 @@ def test_reconciliation_engine():
     reconciliation = ReconciliationEngine(oms)
     assert len(reconciliation.errors) == 0
 
-    order = Order(
+    order = approve(Order(
         order_id="recon-order-001",
         instrument=Instrument(symbol="AAPL"),
         side=OrderSide.BUY,
@@ -219,7 +239,7 @@ def test_reconciliation_engine():
         time_in_force=TimeInForce.DAY,
         status=OrderStatus.SUBMITTED,
         signal=None,
-    )
+    ))
     oms.submit_order(order)
     oms.accept_order("recon-order-001")
     oms.open_order("recon-order-001")
@@ -274,7 +294,7 @@ def test_broker_contract():
     assert hasattr(fake_broker, "cancel_all_orders")
 
     inst = Instrument(symbol="AAPL")
-    filled = Order(
+    filled = approve(Order(
         order_id="broker-order-001",
         instrument=inst,
         side=OrderSide.BUY,
@@ -284,13 +304,13 @@ def test_broker_contract():
         time_in_force=TimeInForce.DAY,
         status=OrderStatus.SUBMITTED,
         signal=None,
-    )
+    ))
     oms.submit_order(filled)
     execution = fake_broker.execute_order(filled, SimpleNamespace(open=102.0, close=103.0))
     assert execution["status"] == "FILLED"
     assert oms.get_order_status("broker-order-001") == "FILLED"
 
-    opened = Order(
+    opened = approve(Order(
         order_id="broker-order-002",
         instrument=inst,
         side=OrderSide.BUY,
@@ -300,7 +320,7 @@ def test_broker_contract():
         time_in_force=TimeInForce.DAY,
         status=OrderStatus.SUBMITTED,
         signal=None,
-    )
+    ))
     oms.submit_order(opened)
     oms.accept_order("broker-order-002")
     oms.open_order("broker-order-002")

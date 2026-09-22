@@ -309,8 +309,17 @@ class PostgresStore:
         try:
             async with pool.acquire() as connection:
                 async with connection.transaction():
-                    if not await connection.fetchval("SELECT 1 FROM risk_decisions WHERE order_id=$1", order_id):
+                    risk_row = await connection.fetchrow(
+                        "SELECT approved, policy_version FROM risk_decisions WHERE order_id=$1", order_id
+                    )
+                    if risk_row is None:
                         raise PersistenceUnavailable("order has no persisted risk decision")
+                    if not bool(risk_row["approved"]) or not str(risk_row["policy_version"]).strip():
+                        raise PersistenceUnavailable("order does not have an approved policy-versioned risk decision")
+                    if status == "FILLED":
+                        has_fill = await connection.fetchval("SELECT 1 FROM fills WHERE order_id=$1 LIMIT 1", order_id)
+                        if not has_fill:
+                            raise PersistenceUnavailable("filled order has no persisted fill")
                     await connection.execute(
                         "INSERT INTO orders(order_id,broker_order_id,status,updated_at) VALUES($1,$2,$3,$4) "
                         "ON CONFLICT(order_id) DO UPDATE SET "
@@ -332,7 +341,7 @@ class PostgresStore:
         try:
             rows = await pool.fetch(
                 "SELECT order_id, broker_order_id, status FROM orders "
-                "WHERE status NOT IN ('FILLED','CANCELED','REJECTED','EXPIRED') "
+                "WHERE status NOT IN ('FILLED','CANCELLED','CANCELED','REJECTED','EXPIRED') "
                 "ORDER BY updated_at"
             )
         except asyncpg.PostgresError as exc:

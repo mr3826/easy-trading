@@ -617,7 +617,13 @@ class ShadowSessionOperator:
         current_cash = signal_data.get("cash", 10000.0)
 
         start = time.perf_counter()
-        approved, reason, policy = self.risk_engine.check_order(order, positions, current_cash)
+        approved, reason, policy = self.risk_engine.check_order(
+            order,
+            positions,
+            current_cash,
+            starting_cash=current_cash,
+            daily_loss=0.0,
+        )
         latency_ms = (time.perf_counter() - start) * 1000
         self.monitor.record_decision_latency(latency_ms)
 

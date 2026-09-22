@@ -11,10 +11,12 @@ from trading_platform.domain import (
     BrokerSnapshot,
     Instrument,
     Order,
+    OrderIntent,
     OrderSide,
     OrderStatus,
     OrderType,
     Position,
+    RiskDecision,
     Signal,
     TimeInForce,
 )
@@ -34,8 +36,18 @@ CASH_VALUES = st.floats(min_value=0.0, max_value=10_000_000.0, allow_nan=False, 
 def make_order(order_id: str, symbol: str, side: OrderSide, quantity: int, price: float | None) -> Order:
     instrument = Instrument(symbol)
     signal = Signal(instrument, side, quantity, price, OrderType.LIMIT, TimeInForce.DAY)
+    intent = OrderIntent(signal=signal, order_id=order_id)
     return Order(
-        order_id, instrument, side, quantity, price, OrderType.LIMIT, TimeInForce.DAY, OrderStatus.SUBMITTED, signal
+        order_id,
+        instrument,
+        side,
+        quantity,
+        price,
+        OrderType.LIMIT,
+        TimeInForce.DAY,
+        OrderStatus.SUBMITTED,
+        signal,
+        risk_decision=RiskDecision(intent, True, reason="test approval", policy_version="test-v1"),
     )
 
 
@@ -68,6 +80,49 @@ def test_check_order_never_breaches_cash_limit(symbol: str, quantity: int, price
         assert cost <= cash + 1e-6
     if cost > cash + 1e-6:
         assert not approved
+
+
+def test_sector_check_exception_blocks_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sector-check failure must fail closed instead of approving the order."""
+    from trading_platform.risk import limits
+
+    def fail_sector_check(*_args: object, **_kwargs: object) -> tuple[bool, str]:
+        raise RuntimeError("sector data unavailable")
+
+    monkeypatch.setattr(limits, "check_sector_concentration", fail_sector_check)
+    approved, reason, _policy = make_engine().check_order(
+        make_order("sector-fail-closed", "AAPL", OrderSide.BUY, 1, 100.0),
+        {},
+        1_000.0,
+        starting_cash=1_000.0,
+    )
+    assert not approved
+    assert "failed closed" in reason
+
+
+def test_proposed_order_notional_counts_against_gross_exposure() -> None:
+    engine = make_engine(max_gross_exposure=1_000.0)
+    existing = {"AAPL": Position(Instrument("AAPL"), 9, 100.0, 900.0, 0.0, 0.0)}
+    order = make_order("proposed-exposure", "MSFT", OrderSide.BUY, 2, 100.0)
+    approved, reason, _policy = engine.check_order(order, existing, 10_000.0, starting_cash=10_000.0)
+    assert not approved
+    assert "exposure" in reason.lower()
+
+
+def test_unheld_sell_is_rejected_as_a_short() -> None:
+    engine = make_engine()
+    order = make_order("unheld-sell", "AAPL", OrderSide.SELL, 1, 100.0)
+    approved, reason, _policy = engine.check_order(order, {}, 10_000.0, starting_cash=10_000.0)
+    assert not approved
+    assert "long-only" in reason.lower()
+
+
+def test_cash_reserve_uses_projected_post_order_cash() -> None:
+    engine = make_engine(min_cash_reserve_pct=20.0, commission_per_order=1.0)
+    order = make_order("reserve", "AAPL", OrderSide.BUY, 8, 100.0)
+    approved, reason, _policy = engine.check_order(order, {}, 1_000.0, starting_cash=1_000.0)
+    assert not approved
+    assert "cash reserve" in reason.lower()
 
 
 @given(
