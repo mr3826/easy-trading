@@ -294,3 +294,30 @@ def test_chaos_duplicate_events_detected_in_shadow(tmp_path: Path) -> None:
     assert len(result.decisions) == 2
     assert len(read_lines(tmp_path / "archive" / "inputs.jsonl")) == 4
     assert ShadowArchive(tmp_path / "archive").verify()
+
+
+def test_async_postgres_sink_is_rejected_by_sync_path_and_awaited_by_async_path(tmp_path: Path) -> None:
+    import asyncio
+
+    class AsyncSink:
+        def __init__(self) -> None:
+            self.calls: list = []
+
+        def record_shadow_decision(self, decision):
+            async def store() -> None:
+                self.calls.append(decision)
+
+            return store()
+
+    bars = [make_bar(day=1)]
+    sink = AsyncSink()
+    archive = ShadowArchive(tmp_path / "async-archive")
+    sync_orchestrator, _risk, _strategy = build_orchestrator(bars, tmp_path / "sync", db_sinks=[sink, archive])
+    with pytest.raises(RuntimeError, match="async shadow sink"):
+        sync_orchestrator.run(Instrument("AAPL"), datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 1, tzinfo=UTC))
+
+    async def _main() -> None:
+        await sync_orchestrator._decide_async(bars[0], record_decision=True)
+
+    asyncio.run(_main())
+    assert sink.calls, "async decision sink was awaited by the async shadow path"

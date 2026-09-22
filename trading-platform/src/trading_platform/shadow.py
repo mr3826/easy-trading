@@ -11,6 +11,7 @@ impossible: no order-submission method exists on the shadow path.
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -325,16 +326,74 @@ class ShadowOrchestrator:
         if record_decision:
             self.archive.record_shadow_decision(record)
             for sink in self.db_sinks:
-                sink.record_shadow_decision(record)
-        if approved:
-            current = self.positions.get(bar.instrument.symbol, 0)
-            current_quantity = int(getattr(current, "quantity", current if isinstance(current, (int, float)) else 0))
-            if signal.side == OrderSide.BUY:
-                self.positions[bar.instrument.symbol] = current_quantity + signal.quantity
-                self.cash -= signal.quantity * bar.close
-            else:
-                self.positions[bar.instrument.symbol] = current_quantity - signal.quantity
-                self.cash += signal.quantity * bar.close
+                result = sink.record_shadow_decision(record)
+                if inspect.isawaitable(result):
+                    if hasattr(result, "close"):
+                        result.close()
+                    raise RuntimeError("async shadow sink requires an async shadow run path")
+        self._update_hypothetical_state(signal, bar.close, approved)
+        return record
+
+    def _update_hypothetical_state(self, signal: Signal, price: float, approved: bool) -> None:
+        """Apply an approved hypothetical fill to the shadow-only state."""
+        if not approved:
+            return
+        current = self.positions.get(signal.instrument.symbol, 0)
+        current_quantity = int(getattr(current, "quantity", current if isinstance(current, (int, float)) else 0))
+        if signal.side == OrderSide.BUY:
+            self.positions[signal.instrument.symbol] = current_quantity + signal.quantity
+            self.cash -= signal.quantity * price
+        else:
+            self.positions[signal.instrument.symbol] = current_quantity - signal.quantity
+            self.cash += signal.quantity * price
+
+    async def _decide_async(self, bar: Bar, record_decision: bool) -> dict[str, Any] | None:
+        """Async counterpart that can await a Postgres shadow decision sink."""
+        signal = self.strategy(bar)
+        if signal is None:
+            return None
+        order = Order(
+            order_id=f"shadow_{bar.instrument.symbol}_{bar.timestamp.astimezone(timezone.utc).isoformat()}",
+            instrument=bar.instrument,
+            side=signal.side,
+            quantity=signal.quantity,
+            price=bar.close,
+            order_type=OrderType.MARKET,
+            time_in_force=TimeInForce.DAY,
+            status=OrderStatus.SUBMITTED,
+            signal=signal,
+        )
+        try:
+            approved, reason, policy = self.risk_engine.check_order(
+                order,
+                self.positions,
+                self.cash,
+                starting_cash=self.initial_cash,
+                daily_loss=0.0,
+            )
+        except TypeError as exc:
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            approved, reason, policy = self.risk_engine.check_order(order, self.positions, self.cash)
+        record: dict[str, Any] = {
+            "symbol": bar.instrument.symbol,
+            "action": ACTION_WOULD_SUBMIT if approved else ACTION_RISK_REJECTED,
+            "side": signal.side.name,
+            "quantity": signal.quantity,
+            "price": bar.close,
+            "bar_timestamp": bar.timestamp.astimezone(timezone.utc).isoformat(),
+            "bar_close": bar.close,
+            "bar_checksum": str(bar_record(bar)["checksum"]),
+            "risk_reason": reason,
+            "risk_policy_version": policy.version if policy is not None else None,
+        }
+        if record_decision:
+            await self.archive.record_shadow_decision_async(record)
+            for sink in self.db_sinks:
+                result = sink.record_shadow_decision(record)
+                if inspect.isawaitable(result):
+                    await result
+        self._update_hypothetical_state(signal, bar.close, approved)
         return record
 
     def run(self, instrument: Instrument, start: datetime, end: datetime) -> ShadowRunResult:

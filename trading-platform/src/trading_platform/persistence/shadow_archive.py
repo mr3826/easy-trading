@@ -10,9 +10,10 @@ the file-based archive remains fully functional.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Awaitable, Mapping, Protocol
 
 DECISIONS_FILE = "decisions.jsonl"
 INPUTS_FILE = "inputs.jsonl"
@@ -25,7 +26,7 @@ _FILES = (DECISIONS_FILE, INPUTS_FILE, PROBLEMS_FILE, DISCREPANCIES_FILE)
 class ShadowDecisionSink(Protocol):
     """Durable decision-sink contract (C3): C provides the DB writer."""
 
-    def record_shadow_decision(self, decision: Mapping[str, Any]) -> None: ...
+    def record_shadow_decision(self, decision: Mapping[str, Any]) -> None | Awaitable[None]: ...
 
 
 def canonical_bytes(payload: Mapping[str, Any]) -> bytes:
@@ -82,7 +83,18 @@ class ShadowArchive:
         """Persist a decision to the file archive and forward to the DB sink."""
         self._append(DECISIONS_FILE, decision)
         if self.db_sink is not None:
-            self.db_sink.record_shadow_decision(decision)
+            result = self.db_sink.record_shadow_decision(decision)
+            if inspect.isawaitable(result):
+                result.close() if hasattr(result, "close") else None
+                raise RuntimeError("async shadow sink requires ShadowArchive.record_shadow_decision_async")
+
+    async def record_shadow_decision_async(self, decision: Mapping[str, Any]) -> None:
+        """Persist and await an asynchronous database decision sink."""
+        self._append(DECISIONS_FILE, decision)
+        if self.db_sink is not None:
+            result = self.db_sink.record_shadow_decision(decision)
+            if inspect.isawaitable(result):
+                await result
 
     def record_problem(self, record: Mapping[str, Any]) -> None:
         """Persist a data-quality problem (stale, missing, revised, duplicate)."""
