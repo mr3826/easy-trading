@@ -133,12 +133,13 @@ def check_buying_power(
     order_price: float,
     current_cash: float,
     current_positions: Dict[str, Position],
-    commission: float = 1.0,
+    commission: float,
 ) -> Tuple[bool, str]:
     """Check if a buy order is affordable in a cash account.
 
     V1: no leverage, cash = settled cash only.
-    Estimated cost = abs(qty) * price + commission.
+    Estimated cost = abs(qty) * price + commission; commission must be
+    supplied from policy/config so no fee assumption is hard-coded here.
 
     Returns (approved, reason).
     """

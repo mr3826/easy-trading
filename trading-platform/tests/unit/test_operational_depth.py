@@ -160,8 +160,8 @@ def test_risk_limits_and_hard_controls() -> None:
         "AAPL": Position(Instrument("AAPL"), 10, 100, 1000, 0, 0),
         "MSFT": Position(Instrument("MSFT"), 10, 100, 1000, 0, 0),
     }
-    assert check_buying_power(1, 100, 500, {})[0]
-    assert not check_buying_power(10, 100, 500, {})[0]
+    assert check_buying_power(1, 100, 500, {}, 1.0)[0]
+    assert not check_buying_power(10, 100, 500, {}, 1.0)[0]
     assert not check_gross_exposure(pos, 100)[0]
     assert not check_sector_concentration(Instrument("AAPL"), pos, {"AAPL": "tech", "MSFT": "tech"})[0]
     limits = PortfolioRiskLimits(
@@ -261,7 +261,9 @@ def test_oms_lifecycle_fake_broker_and_oca() -> None:
     oms = OMS("depth")
     order = make_order()
     assert oms.submit_order(order, "idem-1")[0]
-    assert oms.submit_order(order, "idem-1")[0]
+    duplicate = oms.submit_order(order, "idem-1")
+    assert not duplicate[0]
+    assert "Duplicate submission" in duplicate[1]
     assert len(oms.orders) == 1
     assert oms.accept_order(order.order_id)
     assert oms.open_order(order.order_id)
@@ -308,7 +310,7 @@ def test_oms_negative_paths_replacement_timeout_and_price_modes() -> None:
     assert oms.accept_order(order.order_id)
     assert oms.open_order(order.order_id)
     assert oms.fill_order(order.order_id, 1, 100)
-    assert oms.get_order_status(order.order_id) == "OPEN"
+    assert oms.get_order_status(order.order_id) == "PARTIALLY_FILLED"
     oms.set_timeout(order.order_id, datetime.now(UTC) - timedelta(seconds=1))
     assert oms.check_timeout(order.order_id, datetime.now(UTC))
     assert oms.get_order_status(order.order_id) == "CANCELLED"
@@ -323,9 +325,14 @@ def test_oms_negative_paths_replacement_timeout_and_price_modes() -> None:
     assert replacement_oms.get_order_status(old.order_id) == "CANCELLED"
     assert replacement_oms.get_order_status(replacement.order_id) == "SUBMITTED"
     assert replacement_oms.list_oca_groups()
-    assert replacement_oms.get_event_ledger()
-    replacement_oms.clear_event_ledger()
-    assert not replacement_oms.get_event_ledger()
+    ledger_events = replacement_oms.get_event_ledger()
+    assert [event["event"] for event in ledger_events] == [
+        "ORDER_SUBMITTED",
+        "ORDER_ACCEPTED",
+        "ORDER_OPEN",
+        "ORDER_CANCELED",
+        "ORDER_REPLACED",
+    ]
 
     fake = FakeBroker(replacement_oms, "MARKET")
     assert fake._calculate_fill_price(replacement, make_bar("ORCL", opening=100)).__class__ is float
@@ -361,6 +368,9 @@ def test_reconciliation_scheduler_and_monitor() -> None:
     oms = OMS("reconcile")
     recon = ReconciliationEngine(oms)
     assert recon.reconcile_all(1000, 1000, {}, {}, 0, 0, {"one": {"status": "OPEN"}}, {})["overall_status"] == "FAIL"
+    assert recon.blocks_new_orders
+    assert recon.resolve("operator", "acknowledged")
+    assert not recon.blocks_new_orders
     recon.clear_errors()
     assert recon.reconcile_all(1000, 1000, {}, {}, 0, 0, {}, {})["overall_status"] == "PASS"
     assert recon.validate_paper_session("session", 1000, 999, {"AAPL": 1}, {}, [], {})["overall_status"] == "FAIL"
