@@ -1,6 +1,6 @@
-commit=8b4bc911015da9a4691e02fd91e847664037d1f3
+commit=7f7cab653d1c791aba426a68327e3bbdb577d741
 command=uv run coverage report --show-missing
-utc=2026-09-16T21:09:01.534963+00:00
+utc=2026-09-22T23:17:30.314675+00:00
 platform=nt
 python=Python 3.14.3
 uv=uv 0.10.9 (f675560f3 2026-03-06)
@@ -10,34 +10,38 @@ Name                                                                          St
 -----------------------------------------------------------------------------------------------------------
 trading-platform\src\trading_platform\__init__.py                                 0      0   100%
 trading-platform\src\trading_platform\authorization.py                           29      2    93%   34, 56
-trading-platform\src\trading_platform\backup.py                                  23      3    87%   33, 42, 45
-trading-platform\src\trading_platform\broker_adapter.py                         101     26    74%   92, 123, 127, 145-148, 156, 163-165, 204-222, 260, 263, 269, 273
-trading-platform\src\trading_platform\chaos_engine.py                           176     27    85%   126, 134, 136, 153, 176-178, 190-192, 197-206, 224, 233-235, 279, 283, 285, 289, 291, 345, 348-349, 369
+trading-platform\src\trading_platform\backup.py                                 121     14    88%   41, 60, 111, 121, 124, 143, 153, 156, 164-167, 179, 183
+trading-platform\src\trading_platform\broker\__init__.py                          4      0   100%
+trading-platform\src\trading_platform\broker\base.py                             17      0   100%
+trading-platform\src\trading_platform\broker\fake.py                             34      4    88%   41, 44, 50, 54
+trading-platform\src\trading_platform\broker\ibkr_paper.py                      464     85    82%   68, 71, 91, 94-95, 97, 127, 164, 197, 263, 266-267, 291, 323-324, 346, 363, 376-377, 390-391, 401-403, 421, 426-429, 474, 480, 482, 489, 496, 499, 501-511, 563, 569-573, 588-589, 592-595, 608, 619, 634, 665, 672, 735-738, 752-770
+trading-platform\src\trading_platform\broker_adapter.py                           4      0   100%
+trading-platform\src\trading_platform\chaos_engine.py                           207     27    87%   92, 170, 193-195, 207-209, 214-223, 241, 264-266, 310, 314, 316, 320, 322, 324, 326, 386, 389-390, 415
 trading-platform\src\trading_platform\cli\__init__.py                            10     10     0%   3-20
 trading-platform\src\trading_platform\config.py                                  15      0   100%
-trading-platform\src\trading_platform\data\__init__.py                          101     21    79%   64, 68, 72, 76, 91, 95, 99, 103, 147, 174-175, 179, 198, 201, 204, 207, 210, 213, 232-233, 249
+trading-platform\src\trading_platform\data\__init__.py                          250     34    86%   85, 89, 93, 97, 112, 116, 120, 124, 145, 192, 204, 239, 250, 253, 256, 275-278, 327-329, 334, 374, 468, 472-473, 515, 518, 521, 524, 527, 546-547, 563
 trading-platform\src\trading_platform\data\ingestion\__init__.py                  2      0   100%
-trading-platform\src\trading_platform\data\ingestion\daily_bar_ingestion.py      82     14    83%   58, 76, 91-92, 97, 117-121, 132, 173, 184, 218
+trading-platform\src\trading_platform\data\ingestion\daily_bar_ingestion.py     144     19    87%   90, 94, 116, 130, 147-148, 153, 157-161, 179-183, 226, 250
 trading-platform\src\trading_platform\dead_man.py                                21      8    62%   16, 22-28, 32
-trading-platform\src\trading_platform\domain\__init__.py                        207     10    95%   26, 33, 59, 61, 115, 155, 157, 207, 259, 264
-trading-platform\src\trading_platform\features\__init__.py                       38      1    97%   56
-trading-platform\src\trading_platform\ml_pipeline.py                            101      8    92%   26, 30, 77, 85, 89, 92, 138-139
-trading-platform\src\trading_platform\ml_ranking.py                             196     39    80%   59-61, 64, 83-85, 235, 237, 239, 241, 261-267, 309, 326-327, 344-345, 363-364, 374-375, 378-379, 383-390, 435, 460-465, 485
-trading-platform\src\trading_platform\monitor.py                                169     22    87%   51, 138, 171-175, 180, 240-244, 250, 269-270, 316, 357-359, 364-366, 381, 388, 392, 396, 499
+trading-platform\src\trading_platform\domain\__init__.py                        240     11    95%   26, 33, 62, 134, 175, 177, 227, 229, 234, 286, 296
+trading-platform\src\trading_platform\features\__init__.py                       38      1    97%   66
+trading-platform\src\trading_platform\ml_pipeline.py                            147      8    95%   28, 39, 81, 89, 93, 96, 240-241
+trading-platform\src\trading_platform\ml_ranking.py                             294     46    84%   65-67, 70, 89-91, 167, 195, 199, 229, 325, 327, 347-353, 451-452, 470-471, 485-486, 495-496, 498-499, 502, 535-538, 544-550, 603, 628-633, 653, 664, 670
+trading-platform\src\trading_platform\monitor.py                                235     15    94%   56, 213, 246-250, 341-345, 407-408, 456, 519, 526, 530, 534
 trading-platform\src\trading_platform\observability\__init__.py                  14      1    93%   22
-trading-platform\src\trading_platform\oms\oms.py                                216     21    90%   55, 94-95, 155, 217, 267, 338-340, 356, 370-371, 412-413, 432, 446, 548, 562-565
+trading-platform\src\trading_platform\oms\oms.py                                405     21    95%   101, 106-107, 199, 201, 203, 205, 216, 270, 388-397, 483, 657, 729, 736, 847-848, 867-870
 trading-platform\src\trading_platform\persistence\__init__.py                     0      0   100%
-trading-platform\src\trading_platform\persistence\baseline_report.py            160     21    87%   43, 60, 64, 74, 79, 88, 153, 236, 246-256, 259, 300, 302
-trading-platform\src\trading_platform\persistence\experiment.py                 112     31    72%   91-94, 113-126, 215, 223-225, 238, 242, 246-256, 260
-trading-platform\src\trading_platform\persistence\postgres.py                   154     37    76%   80-81, 97, 108-109, 158-159, 183-184, 208-209, 233-234, 249-250, 274-275, 297-298, 313, 324-327, 338-339, 364-365, 381-382, 404-405, 424-425, 449-450, 462
-trading-platform\src\trading_platform\reconciliation\__init__.py                 12      0   100%
+trading-platform\src\trading_platform\persistence\baseline_report.py            187     23    88%   41, 58, 62, 72, 77, 158, 241, 266-267, 275, 285-295, 298, 339, 341
+trading-platform\src\trading_platform\persistence\experiment.py                 160     39    76%   67, 133-136, 155-169, 193, 207-223, 261-262, 306, 314, 331, 335, 339-349
+trading-platform\src\trading_platform\persistence\postgres.py                   198     47    76%   80-81, 97, 108-109, 158-159, 183-184, 208-209, 233-234, 249-250, 274-275, 297-298, 316, 318, 320-322, 333-336, 347-348, 373-374, 390-391, 413-414, 428, 445-446, 456-457, 465-466, 486-487, 511-512
+trading-platform\src\trading_platform\persistence\shadow_archive.py              86      8    91%   48, 103, 118, 122, 133, 136-137, 139
+trading-platform\src\trading_platform\reconciliation\__init__.py                108      0   100%
 trading-platform\src\trading_platform\risk\__init__.py                            0      0   100%
-trading-platform\src\trading_platform\risk\limits.py                             73     11    85%   48, 89, 97, 186, 190, 199, 203, 211, 215, 220, 224
-trading-platform\src\trading_platform\risk\risk_engine.py                       364     36    90%   72, 132, 188-189, 191-192, 208-220, 270-272, 312, 316, 334, 420-421, 613-615, 632-634, 648-650, 882-883, 904-905, 982, 1031
-trading-platform\src\trading_platform\risk__init__.py                             0      0   100%
-trading-platform\src\trading_platform\shadow.py                                  23      0   100%
-trading-platform\src\trading_platform\simulator\event_driven_simulator.py       257     32    88%   339, 453, 466-467, 506, 511-514, 533, 542-558, 579-580, 593-597, 663, 667, 671, 675, 679
-trading-platform\src\trading_platform\strategies\ma_cross_strategy.py            40      7    82%   58, 87, 93, 99, 104, 110, 130
-trading-platform\src\trading_platform\walk_forward\walk_forward.py              183     40    78%   87, 130, 226-236, 245-255, 263-273, 322-326, 338-340, 355-367, 398
+trading-platform\src\trading_platform\risk\limits.py                             73      1    99%   89
+trading-platform\src\trading_platform\risk\risk_engine.py                       553     52    91%   84, 158, 212-214, 216-218, 242-243, 271-272, 298, 376-378, 418, 422, 442, 721, 736, 838-840, 857-859, 873-875, 1170-1171, 1206-1211, 1221-1223, 1271, 1287, 1312-1313, 1343-1350, 1414, 1463
+trading-platform\src\trading_platform\shadow.py                                 221     15    93%   159, 203, 237-245, 311, 328, 336-337, 385, 396, 399, 418, 422
+trading-platform\src\trading_platform\simulator\event_driven_simulator.py       277     43    84%   113, 200-213, 350, 360, 447, 485, 498-499, 539, 544-547, 566, 575-596, 617-618, 630, 633-637, 703, 707, 711, 715, 719
+trading-platform\src\trading_platform\strategies\ma_cross_strategy.py            47      5    89%   58, 98, 112, 121, 127
+trading-platform\src\trading_platform\walk_forward\walk_forward.py              266      9    97%   137, 366, 368, 372, 378, 445, 459, 627, 705
 -----------------------------------------------------------------------------------------------------------
-TOTAL                                                                          2879    428    85%
+TOTAL                                                                          4871    548    89%

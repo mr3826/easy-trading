@@ -1,42 +1,50 @@
-# Current State Audit
+# Current Platform State
 
-**Audit timestamp:** 2026-09-16T00:39:22Z baseline; final verification recorded after implementation.
-**Starting branch:** `fix/verified-platform-foundation`
-**Starting commit:** `9b461b5`
-**Final verified source head:** `73b8250`; **main baseline:** `323a701`
+Updated after final local verification at source SHA
+`7f7cab653d1c791aba426a68327e3bbdb577d741`.
 
-## Baseline Evidence
+## Code and CI Evidence
 
-| Command | Result |
-|---|---|
-| `uv sync --all-extras --locked` | PASS, exit 0 |
-| `uv run python -c "import trading_platform"` | PASS, exit 0 |
-| `uv run pytest --collect-only -q` | PASS, exit 0, recursive fallback and unknown `integration` marker warning |
-| `uv run pytest -m "not external" -q` | PASS, 47 passed, exit 0 |
-| `uv run ruff check .` | FAIL, exit 1, 347 errors |
-| `uv run ruff format --check .` | PASS, exit 0, deprecation warning |
-| `uv run mypy trading-platform/src` | FAIL, exit 1, 121 errors in 12 files |
-| `uv run pip-audit` | PASS, exit 0; local project is not published to PyPI |
+- Integration branch: `integration/remaining-platform-work`.
+- Local PostgreSQL 16 integration: 2 passed.
+- Non-external suite: 228 passed; 2 external tests deselected.
+- Overall coverage: 89%.
+- Critical coverage: 93% aggregate (`oms 95%`, `risk_engine 91%`,
+  `reconciliation 100%`, `authorization 93%`).
+- Ruff, formatting, strict mypy, import smoke, dependency audit, and secret
+  scan passed.
+- External IBKR tests were collected but not executed.
 
-Environment: Windows, Python 3.12.10, uv 0.10.9. All baseline commands used the local virtual environment. No broker, database, or paid data service was contacted.
+## Implemented Code
 
-## Final Verification
+- Daily-bar Parquet read/write, raw archival, checksums, revisions, corporate
+  action boundaries, and point-in-time availability filtering.
+- Chronological research, real experiment provenance hashes, walk-forward
+  no-lookahead checks, robustness analyses, and deterministic replay.
+- OMS ledger protections, policy-versioned risk approval, independent broker
+  reconciliation, incident blocking, partial-fill validation, and recovery
+  replay.
+- Genuine shadow orchestration, archival/replay, monitoring probes, chaos
+  injection, encrypted backup/restore, and no submission method.
+- IBKR paper adapter boundary with lazy client import, paper target checks,
+  global live kill switch, two boolean authorization flags, callbacks, and
+  external smoke tests.
+- Deterministic ML baseline/trainable ranker, provenance hashes, promotion
+  gate, and fail-closed LLM feature validation.
 
-The final explicit collection command reports 74 nodes after consolidating the
-five duplicate `test_wf2.py` nodes. With isolated PostgreSQL configured, the
-final suite reports 74 passed, 85% overall coverage, and 90% aggregate coverage
-for OMS/risk/reconciliation/authorization. Ruff, formatting, strict mypy,
-recursive imports, dependency audit, local secret scan, and GitHub Actions pass.
-Evidence is under `artifacts/verification/`.
+## Open or External Gates
 
-## Structure and Findings
+- Protective-order enforcement remains policy-configurable; production must
+  enable the protective-order requirement and verify active same-symbol stop
+  coverage before any live or paper execution.
+- Real IBKR paper connectivity and any paper order submission were not done.
+- Vendor licensing/selection, external alert delivery, dead-man deployment,
+  60-day paper/shadow observation, and production restore drill remain open.
+- No profitability, forward-performance, or live-trading claim is made.
 
-Production code is under `trading-platform/src/trading_platform`. It now includes validated domain models, daily-bar ingestion, a no-lookahead simulator, deterministic strategy/report paths, OMS/risk/reconciliation, async PostgreSQL persistence, fake/shadow/paper broker boundaries, monitoring/alerts/dead-man checks, deterministic ML Stage A, and strict AI feature validation. The original phase plan exists at `AI_Trading_Platform_Phase_By_Phase_Execution_Plan.md`.
+## Permanent Restriction
 
-The original pytest configuration targeted a nonexistent root `tests` directory, so root-level `phase*_test.py` and scratch scripts were collected by fallback. Legitimate tests were relocated under the configured root; duplicate walk-forward tests were consolidated. The CI workflow now uses locked uv installation, PostgreSQL, coverage thresholds, artifacts, and Gitleaks.
-
-The working tree contained 38 modified tracked files and numerous untracked debugging scripts and tool-output files. These changes were not authored by this audit and are preserved pending review; no destructive git cleanup was used.
-
-## Coding Status Ceiling
-
-No paper or live broker connection, shadow operation, 60-day validation, or AI promotion is claimed. The evidence bundle distinguishes local/CI proof from external and forward-evidence gates. The worktree still contains pre-existing scratch files preserved for human review.
+```text
+LIVE_TRADING_ENABLED=false
+LIVE_STATUS=NOT_AUTHORIZED
+```
