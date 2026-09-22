@@ -10,8 +10,11 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+_INJECTION_RE = re.compile(r"(ignore\s+(all\s+)?previous|system\s+message|tool\s+call)", re.I)
 
 # ---------------------------------------------------------------------------
 # ML Candidate Registry
@@ -38,6 +41,7 @@ class MLCandidate:
         metrics: Dict[str, float],
         creation_date: datetime,
         environment: str = "simulation",
+        feature_available_at: Optional[Dict[str, datetime]] = None,
     ):
         self.candidate_id = candidate_id
         self.model_name = model_name
@@ -50,6 +54,7 @@ class MLCandidate:
         self.metrics = metrics
         self.creation_date = creation_date
         self.environment = environment
+        self.feature_available_at: Dict[str, datetime] = feature_available_at or {}
         self.promotion_evidence: Optional[Dict[str, Any]] = None
         self.rejected: bool = False
         self.reject_reason: Optional[str] = None
@@ -145,22 +150,99 @@ class MLCandidateRegistry:
             self.candidates[candidate_id].rejected = True
             self.candidates[candidate_id].reject_reason = reason
 
+    def promote(self, candidate_id: str, evidence: Dict[str, Any], gate: PromotionGate) -> Dict[str, Any]:
+        """Attempt to promote a candidate through the promotion gate.
+
+        Promotion requires the gate's criteria (at least two independent
+        metric conditions) and a non-LLM evidence source; historical LLM
+        results are denied without rejecting the candidate (the evidence
+        source is illegitimate, not the candidate). Candidates failing the
+        gate's own criteria are marked rejected instead of silently promoted.
+        """
+        candidate = self.candidates.get(candidate_id)
+        if candidate is None:
+            raise ValueError(f"unknown candidate {candidate_id}")
+        if candidate.rejected:
+            return {"promoted": False, "conditions_met": 0, "reason": candidate.reject_reason}
+        source = str(evidence.get("source", "")).lower()
+        if "llm" in source:
+            return {
+                "promoted": False,
+                "conditions_met": 0,
+                "reason": "historical LLM results do not authorize promotion",
+            }
+        evaluation = gate.evaluate(evidence)
+        if not evaluation["promoted"]:
+            candidate.rejected = True
+            candidate.reject_reason = evaluation.get("reason") or "promotion gate failed"
+            return {**evaluation, "promoted": False}
+        candidate.promotion_evidence = evidence
+        return {**evaluation, "promoted": True}
+
     def is_feature_leakage(self, feature: str, decision_timestamp: datetime) -> bool:
         """Check if using a feature at a decision timestamp would cause leakage.
 
-        V1: Returns True if the feature's data is not point-in-time before
-        the decision timestamp.
+        Real check using per-feature availability provenance: an unknown
+        feature leaks; a feature whose availability timestamp is missing from
+        every registered carrier leaks; a feature that only becomes available
+        AFTER the decision timestamp leaks (future data).
         """
         if feature not in self.registered_features:
             return True
-        # In V1, we conservatively flag potential leakage
-        # Full check would require comparing feature timestamps to decision timestamps
+        carriers = [c for c in self.candidates.values() if feature in c.features]
+        if not carriers:
+            return True
+        for carrier in carriers:
+            available_at = carrier.feature_available_at.get(feature)
+            if available_at is None:
+                return True
+            if available_at > decision_timestamp:
+                return True
         return False
 
 
 # ---------------------------------------------------------------------------
 # Stage A: ML Ranking Comparison
 # ---------------------------------------------------------------------------
+
+
+class PromotionGate:
+    """Promotion gate: a candidate is promoted only on independent evidence.
+
+    Criteria are defined BEFORE evaluation. At least TWO independent metric
+    conditions must hold (no automatic promotion from one improved metric):
+    (1) expectancy delta above the minimum, (2) Sharpe delta above the
+    minimum, (3) drawdown improvement. Historical LLM results never count as
+    promotion evidence.
+    """
+
+    def __init__(self, min_expectancy_delta: float = 0.0, min_sharpe_delta: float = 0.0) -> None:
+        self.min_expectancy_delta = min_expectancy_delta
+        self.min_sharpe_delta = min_sharpe_delta
+
+    def evaluate(self, comparison: Dict[str, Any]) -> Dict[str, Any]:
+        """Evaluate a ranking comparison against the promotion criteria."""
+        metrics = comparison.get("metrics_comparison", {})
+        source = str(comparison.get("source", "")).lower()
+        if "llm" in source:
+            return {
+                "promoted": False,
+                "conditions_met": 0,
+                "reason": "historical LLM results do not authorize promotion",
+            }
+        expectancy_ok = metrics.get("expectancy_delta", 0.0) > self.min_expectancy_delta
+        sharpe_ok = metrics.get("sharpe_delta", 0.0) > self.min_sharpe_delta
+        drawdown_ok = metrics.get("drawdown_improvement_pct", 0.0) > 0.0
+        conditions_met = sum(1 for ok in (expectancy_ok, sharpe_ok, drawdown_ok) if ok)
+        promoted = conditions_met >= 2
+        return {
+            "promoted": promoted,
+            "conditions_met": conditions_met,
+            "expectancy_ok": expectancy_ok,
+            "sharpe_ok": sharpe_ok,
+            "drawdown_ok": drawdown_ok,
+            "reason": None if promoted else "promotion gate failed: fewer than two independent conditions met",
+        }
 
 
 class MLRanker:
@@ -179,15 +261,18 @@ class MLRanker:
         self,
         base_metrics: Dict[str, float],
         ranker_metrics: Dict[str, float],
+        source: str = "walk_forward",
     ) -> Dict[str, Any]:
         """Compare BASELINE vs BASELINE + RANKER metrics.
 
-        V1: Returns comparison result with eligibility determination.
+        V1: Returns comparison result with eligibility determination and the
+        evidence source recorded for the promotion gate.
         """
         comparison: Dict[str, Any] = {
             "comparison_timestamp": datetime.now(timezone.utc).isoformat(),
             "base_candidate": self.base_candidate_id,
             "ranker_candidate": self.ranker_candidate_id,
+            "source": source,
             "metrics_comparison": {},
             "eligibility": "PENDING",
             "durable_benefit": None,
@@ -288,6 +373,8 @@ class LLMSentimentFeature:
         creation_date: datetime,
         validation_mode: str = "forward_test",
         allowed_symbols: Optional[set[str]] = None,
+        max_content_age_seconds: float = 86400.0,
+        timeout_seconds: float = 5.0,
     ):
         self.feature_id = feature_id
         self.model_name = model_name
@@ -295,6 +382,8 @@ class LLMSentimentFeature:
         self.creation_date = creation_date
         self.validation_mode = validation_mode
         self.allowed_symbols = allowed_symbols or set()
+        self.max_content_age_seconds = max_content_age_seconds
+        self.timeout_seconds = timeout_seconds
         self.tested_forward_dates: List[datetime] = []
         self.validation_results: Optional[Dict[str, Any]] = None
         self.promotion_evidence: Optional[Dict[str, Any]] = None
@@ -308,10 +397,18 @@ class LLMSentimentFeature:
         """
         self._validator_hooks.append(validator_func)
 
-    def validate_output(self, output: str) -> Dict[str, Any]:
-        """Validate LLM output through registered hooks.
+    def validate_output(
+        self,
+        output: str,
+        decision_time: Optional[datetime] = None,
+        upstream_ok: bool = True,
+    ) -> Dict[str, Any]:
+        """Validate LLM output through registered hooks, fail-closed.
 
-        V1: Returns validation result with any errors detected.
+        Rejects malformed JSON, NaN/infinity, unknown symbols, stale content,
+        contradictory output, prompt injection, validator timeouts, and
+        upstream failures. Any rejection yields FEATURE_REJECTED; failure
+        never means "trade anyway".
         """
         result: Dict[str, Any] = {
             "valid": True,
@@ -319,12 +416,21 @@ class LLMSentimentFeature:
             "parsed_data": None,
         }
 
-        # Hook: check for prompt injection patterns
-        injection_patterns = ["<|prompt|>", "<|system|>", "<?>"]
+        # Upstream provider failure is never a default-pass
+        if not upstream_ok:
+            result["valid"] = False
+            result["errors"].append("FEATURE_REJECTED: upstream failure")
+
+        # Hook: check for prompt injection patterns (real chat-template and
+        # instruction tokens) plus structural injection phrasing
+        injection_patterns = ["<|prompt|>", "<|im_start|>", "<|im_end|>", "[INST]", "[/INST]", "<?>"]
         for pattern in injection_patterns:
             if pattern in output:
                 result["valid"] = False
                 result["errors"].append(f"Prompt injection pattern detected: {pattern}")
+        if _INJECTION_RE.search(output):
+            result["valid"] = False
+            result["errors"].append("Prompt injection phrasing detected")
 
         # AI output is an API boundary, not free-form text. Invalid JSON is
         # rejected rather than being interpreted by downstream code.
@@ -377,10 +483,58 @@ class LLMSentimentFeature:
             if not isinstance(observed_at, str) or not observed_at.strip():
                 result["valid"] = False
                 result["errors"].append("FEATURE_REJECTED: missing provenance")
+            elif _INJECTION_RE.search(observed_at):
+                result["valid"] = False
+                result["errors"].append("FEATURE_REJECTED: injected provenance")
+            elif decision_time is not None:
+                # Real timestamp-staleness check: content observed after the
+                # decision or older than the max age is stale
+                try:
+                    observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+                except ValueError:
+                    observed = None
+                if observed is None:
+                    result["valid"] = False
+                    result["errors"].append("FEATURE_REJECTED: unparseable observed_at provenance")
+                else:
+                    if observed.tzinfo is None:
+                        observed = observed.replace(tzinfo=timezone.utc)
+                    age_seconds = (decision_time - observed).total_seconds()
+                    if age_seconds < 0:
+                        result["valid"] = False
+                        result["errors"].append("FEATURE_REJECTED: observed_at is in the future")
+                    elif age_seconds > self.max_content_age_seconds:
+                        result["valid"] = False
+                        result["errors"].append("FEATURE_REJECTED: stale content")
 
-        # Run all registered validator hooks
+            # Contradictory output: extreme sentiment claimed with near-zero
+            # conviction cannot be acted on (documented definition)
+            if result["parsed_data"] and result["valid"]:
+                sentiment_value = result["parsed_data"].get("sentiment")
+                confidence_value = result["parsed_data"].get("confidence")
+                if (
+                    isinstance(sentiment_value, (int, float))
+                    and not isinstance(sentiment_value, bool)
+                    and isinstance(confidence_value, (int, float))
+                    and not isinstance(confidence_value, bool)
+                    and abs(float(sentiment_value)) > 0.9
+                    and float(confidence_value) < 0.1
+                ):
+                    result["valid"] = False
+                    result["errors"].append("FEATURE_REJECTED: contradictory output")
+
+        # Run all registered validator hooks with a per-hook deadline; a hook
+        # that exceeds its timeout yields FEATURE_REJECTED
+        import time
+
         for hook in self._validator_hooks:
+            started = time.perf_counter()
             hook_result = hook(output)
+            elapsed = time.perf_counter() - started
+            if elapsed > self.timeout_seconds:
+                result["valid"] = False
+                result["errors"].append("FEATURE_REJECTED: validator timeout")
+                continue
             if isinstance(hook_result, dict):
                 if not hook_result.get("valid", True):
                     result["valid"] = False
@@ -424,11 +578,19 @@ class LLMLLMFeatureManager:
         """Get a registered LLM feature by ID."""
         return self.features.get(feature_id)
 
-    def forward_test_feature(self, feature_id: str, forward_date: datetime, llm_output: str) -> Dict[str, Any]:
+    def forward_test_feature(
+        self,
+        feature_id: str,
+        forward_date: datetime,
+        llm_output: str,
+        decision_time: Optional[datetime] = None,
+        upstream_ok: bool = True,
+    ) -> Dict[str, Any]:
         """Run a forward test of an LLM news feature.
 
-        V1: Validates LLM output, records the test result, and determines
-        if the feature provides durable benefit after costs and risk.
+        V1: Validates LLM output (fail-closed), records the test result, and
+        determines if the feature provides durable benefit after costs and
+        risk. Forward results are recorded; no forward performance is claimed.
         """
         feature = self.get_feature(feature_id)
         if feature is None:
@@ -438,7 +600,7 @@ class LLMLLMFeatureManager:
             }
 
         # Validate LLM output
-        validation = feature.validate_output(llm_output)
+        validation = feature.validate_output(llm_output, decision_time=decision_time, upstream_ok=upstream_ok)
 
         # Record the forward test
         feature.record_forward_test(
@@ -478,11 +640,11 @@ class LLMLLMFeatureManager:
 
         V1: Essential security check to prevent prompt injection attacks.
         """
-        injection_patterns = ["<|prompt|>", "<|system|>", "<?>", "ignore previous", "system message"]
+        injection_patterns = ["<|prompt|>", "<|im_start|>", "[INST]", "ignore previous", "system message"]
         for pattern in injection_patterns:
             if pattern.lower() in output.lower():
                 return True
-        return False
+        return _INJECTION_RE.search(output) is not None
 
     def check_llm_no_broker_access(self, feature: LLMSentimentFeature) -> bool:
         """Verify LLM has no broker tool, credentials, network route, or order submission.

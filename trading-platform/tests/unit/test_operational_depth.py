@@ -558,6 +558,7 @@ def test_ml_candidate_and_strict_llm_boundary() -> None:
         "c",
         {},
         now,
+        feature_available_at={"close": now - timedelta(days=1)},
     )
     registry = MLCandidateRegistry()
     registry.register(candidate)
@@ -592,6 +593,10 @@ def test_deterministic_ml_pipeline_is_point_in_time_and_registered() -> None:
             datetime(2026, 1, day, tzinfo=UTC),
             {"momentum": float(day), "volatility": 1.0},
             float(day) / 10,
+            {
+                "momentum": datetime(2026, 1, day, tzinfo=UTC),
+                "volatility": datetime(2026, 1, day, tzinfo=UTC),
+            },
         )
         for day in range(1, 11)
     ]
@@ -602,6 +607,7 @@ def test_deterministic_ml_pipeline_is_point_in_time_and_registered() -> None:
     assert artifact.validation_count == 2
     assert artifact.test_count == 2
     assert artifact.dataset_hash and artifact.model_hash
+    assert artifact.feature_schema_hash
     assert artifact.predict(examples[-1]) > artifact.fallback()
     assert artifact.fallback() == pytest.approx(sum(example.label for example in examples[:6]) / 6)
     registry = MLModelRegistry()
@@ -610,7 +616,15 @@ def test_deterministic_ml_pipeline_is_point_in_time_and_registered() -> None:
     with pytest.raises(ValueError):
         registry.register(artifact)
     with pytest.raises(ModelInputRejected):
-        artifact.predict(TrainingExample(examples[-1].timestamp, examples[-1].available_at, {"other": 1.0}, 0.1))
+        artifact.predict(
+            TrainingExample(
+                examples[-1].timestamp,
+                examples[-1].available_at,
+                {"other": 1.0},
+                0.1,
+                {"other": examples[-1].available_at},
+            )
+        )
     with pytest.raises(ModelInputRejected):
         MLTrainingPipeline().train("bad", list(reversed(examples)), "code", criteria)
     with pytest.raises(ModelInputRejected):
@@ -623,6 +637,10 @@ def test_deterministic_ml_pipeline_is_point_in_time_and_registered() -> None:
                     examples[4].available_at,
                     {"momentum": 6.0, "volatility": 1.0},
                     0.6,
+                    {
+                        "momentum": examples[4].available_at,
+                        "volatility": examples[4].available_at,
+                    },
                 )
             ]
             + examples[6:],
@@ -630,7 +648,13 @@ def test_deterministic_ml_pipeline_is_point_in_time_and_registered() -> None:
             criteria,
         )
     with pytest.raises(ModelInputRejected):
-        TrainingExample(examples[0].timestamp, examples[0].timestamp + timedelta(seconds=1), {"x": 1.0}, 0.1)
+        TrainingExample(
+            examples[0].timestamp,
+            examples[0].timestamp + timedelta(seconds=1),
+            {"x": 1.0},
+            0.1,
+            {"x": examples[0].timestamp + timedelta(seconds=1)},
+        )
 
 
 def test_strategy_metrics_and_walk_forward_split() -> None:
