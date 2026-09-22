@@ -1,5 +1,8 @@
 """Phase 4 tests for the AI Trading Platform."""
 
+from datetime import datetime
+from pathlib import Path
+
 from trading_platform.strategies.ma_cross_strategy import (
     MaCrossHypothesis,
     generate_signal,
@@ -64,6 +67,15 @@ def test_position_limit():
     ok3, reason3 = check_position_limit(1, pos_dict, Instrument(symbol="GOOGL"))
     assert ok3 is True
 
+    # A fourth new position must be rejected (max is 3)
+    full_book = {
+        sym: Position(Instrument(sym), 10, 100.0, 1000.0, 0.0, 0.0)
+        for sym in ("AAPL", "MSFT", "GOOGL")
+    }
+    ok4, reason4 = check_position_limit(1, full_book, Instrument(symbol="TSLA"))
+    assert ok4 is False
+    assert "Max positions" in reason4
+
 
 def test_buying_power():
     """Test buying power check."""
@@ -78,20 +90,23 @@ def test_buying_power():
     assert "Insufficient" in reason2
 
 
-def test_experiment_record():
-    """Test ExperimentRecord creation and registry."""
+def test_experiment_record(tmp_path):
+    """Test ExperimentRecord creation and registry with real provenance hashes."""
     h = MaCrossHypothesis(fast_length=5, slow_length=20)
     seed = 42
-    reg = ExperimentRegistry()
+    reg = ExperimentRegistry(root=tmp_path / "experiments")
 
     exp_id = ExperimentRecord.new_experiment_id()
+    lock_hash = ExperimentRecord.compute_dependency_lock_hash(Path(__file__).resolve().parents[3] / "uv.lock")
+    policy_hash = ExperimentRecord.compute_policy_hash({"max_positions": 3, "version": "0.1-PROVISIONAL"})
     rec = ExperimentRecord(
         experiment_id=exp_id,
         hypothesis=h,
         dataset_hash=ExperimentRecord.compute_dataset_hash("test_data"),
         universe_version="v1.0",
         code_commit=ExperimentRecord.compute_code_hash(),
-        dependency_lock="dep-lock-123",
+        dependency_lock=lock_hash,
+        policy_hash=policy_hash,
         cost_slippage_assumptions={"commission": 1.0, "slippage_pct": 0.001},
         seed=seed,
         result_metrics={"return": 0.05, "sharpe": 1.2},
@@ -101,6 +116,10 @@ def test_experiment_record():
     assert loaded is not None
     assert loaded.hypothesis.hypothesis_id == h.hypothesis_id
     assert loaded.result_metrics["return"] == 0.05
+    assert loaded.dataset_hash == ExperimentRecord.compute_dataset_hash("test_data")
+    assert len(loaded.code_commit) in (40, 64)
+    assert loaded.dependency_lock == lock_hash
+    assert loaded.policy_hash == policy_hash
 
 
 def test_metrics():
@@ -144,7 +163,7 @@ def test_concentration():
             market_value=1000.0,
             unrealized_pnl=0.0,
             realized_pnl=0.0,
-            last_update="2024-01-01T00:00:00",
+            last_update=datetime(2024, 1, 1),
         ),
         "MSFT": Position(
             instrument=Instrument(symbol="MSFT"),
@@ -153,7 +172,7 @@ def test_concentration():
             market_value=1000.0,
             unrealized_pnl=0.0,
             realized_pnl=0.0,
-            last_update="2024-01-01T00:00:00",
+            last_update=datetime(2024, 1, 1),
         ),
     }
 
