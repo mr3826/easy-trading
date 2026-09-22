@@ -7,7 +7,6 @@ ordinary local runs when no isolated database has been provisioned.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -135,7 +134,7 @@ def test_shadow_decision_roundtrip_idempotency_and_validation() -> None:
             assert row["symbol"] == "AAPL"
             assert row["action"] == "WOULD_SUBMIT"
             assert row["quantity"] == 5
-            assert json.loads(row["decision"])["confidence"] == 0.8
+            assert row["decision"]["confidence"] == 0.8
             assert row["recorded_at"] is not None
 
             with pytest.raises(PersistenceUnavailable):

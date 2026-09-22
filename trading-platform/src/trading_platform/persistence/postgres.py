@@ -446,7 +446,16 @@ class PostgresStore:
             )
         except asyncpg.PostgresError as exc:
             raise PersistenceUnavailable("shadow decision read failed") from exc
-        return [dict(row) for row in rows]
+        decisions: list[dict[str, Any]] = []
+        try:
+            for row in rows:
+                decision = dict(row)
+                if isinstance(decision.get("decision"), str):
+                    decision["decision"] = json.loads(decision["decision"])
+                decisions.append(decision)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise PersistenceUnavailable("shadow decision read failed") from exc
+        return decisions
 
     async def record_incident(
         self,
