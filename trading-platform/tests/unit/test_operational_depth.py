@@ -651,7 +651,7 @@ def test_strategy_metrics_and_walk_forward_split() -> None:
     assert split.get_test_period([date(2026, 1, 1), date(2026, 3, 31)]) == result["test"]
 
 
-def test_baseline_report_and_walk_forward_execution() -> None:
+def test_baseline_report_and_walk_forward_execution(tmp_path: Path) -> None:
     instrument = Instrument("AAPL")
     bars = [make_bar(day=1), make_bar(day=2, opening=102)]
     signal = Signal(instrument, OrderSide.BUY, 1, None, OrderType.MARKET, TimeInForce.DAY)
@@ -661,18 +661,38 @@ def test_baseline_report_and_walk_forward_execution() -> None:
     generated = report.generate()
     assert generated["report_type"] == "engineering_baseline_v1"
     assert generated["summary"]["trade_count"] == 1
+    assert isinstance(generated["risk"]["max_drawdown"], float)
+    assert isinstance(generated["risk"]["turnover"], float)
+    assert generated["determinism"]["seed"] == simulator.seed
     assert "disclaimer" in report.to_json()
     assert compute_turnover(3, 2) == 5.0
+    assert compute_turnover(3, 2, equity=100.0) == 0.05
     assert compute_mae_mfe([]) == {"mae": 0.0, "mfe": 0.0}
     assert compute_mae_mfe([{"entry_price": "bad", "exit_price": 2}]) == {"mae": 0.0, "mfe": 0.0}
 
     period_split = PeriodSplit(30, 10, 15)
-    evaluator = WalkForwardEvaluator(simulator, MaCrossHypothesis(), period_split, ExperimentRegistry())
+    evaluator = WalkForwardEvaluator(
+        simulator, MaCrossHypothesis(), period_split, ExperimentRegistry(root=tmp_path / "experiments")
+    )
     fold = period_split.split(date(2026, 1, 1), date(2026, 3, 31))
     fold_result = evaluator.run_fold(0, fold, {"AAPL": {}}, ["AAPL"])
     assert fold_result["test_trade_count"] == 0
     assert evaluator.aggregate_results()["folds"] == 1
-    assert evaluator.bootstrap_drawdown_distribution(n_resamples=5)["n_resamples"] == 5
+    evaluator.fold_results.append(
+        {
+            "test_total_pnl": 10.0,
+            "test_total_commission": 1.0,
+            "test_total_slippage": 0.0,
+            "test_trade_pnls": [5.0, -2.0, 8.0, -1.0],
+            "test_max_drawdown": 0.01,
+            "test_turnover": 0.001,
+            "test_gross_exposure_pct": 10.0,
+            "long_only_preserved": True,
+        }
+    )
+    bootstrap = evaluator.bootstrap_drawdown_distribution(n_resamples=5)
+    assert bootstrap["n_resamples"] == 5
+    assert bootstrap == evaluator.bootstrap_drawdown_distribution(n_resamples=5)
 
 
 def test_shadow_operator_never_creates_a_fill() -> None:
