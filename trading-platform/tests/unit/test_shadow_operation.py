@@ -230,7 +230,9 @@ def test_revised_data_detection(tmp_path: Path) -> None:
 def test_invalid_bar_is_detected_and_skipped(tmp_path: Path) -> None:
     bars = [make_bar(day=1), make_bar(day=2)]
     orchestrator, _risk, _strategy = build_orchestrator(bars, tmp_path / "archive")
-    bars[0].close = float("nan")
+    # Bar construction now rejects invalid economics, so the defensive
+    # validation path is exercised by simulating corrupted in-memory state
+    object.__setattr__(bars[0], "close", float("nan"))
     result = orchestrator.run(Instrument("AAPL"), datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 2, tzinfo=UTC))
     assert [problem.problem_type for problem in result.problems] == ["invalid"]
     assert result.decisions[0]["bar_timestamp"] == datetime(2026, 1, 2, tzinfo=UTC).isoformat()
