@@ -404,6 +404,59 @@ class PostgresStore:
         except asyncpg.PostgresError as exc:
             raise PersistenceUnavailable("reconciliation write failed") from exc
 
+    async def record_shadow_decision(self, decision: Mapping[str, Any]) -> None:
+        """Persist a shadow decision for deterministic replay (contract C3)."""
+        decision_id = str(decision.get("decision_id", ""))
+        symbol = str(decision.get("symbol", ""))
+        action = str(decision.get("action", ""))
+        quantity = decision.get("quantity")
+        bar_timestamp = decision.get("bar_timestamp")
+        if not decision_id or not symbol or not action:
+            raise PersistenceUnavailable("shadow decision requires decision_id, symbol, and action")
+        if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
+            raise PersistenceUnavailable("shadow decision quantity must be a positive integer")
+        if not isinstance(bar_timestamp, datetime):
+            raise PersistenceUnavailable("shadow decision bar_timestamp must be a timezone-aware datetime")
+        try:
+            bar_timestamp = _utc(bar_timestamp)
+        except ValueError as exc:
+            raise PersistenceUnavailable("shadow decision bar_timestamp must be timezone-aware") from exc
+        pool = self._require_pool()
+        try:
+            await pool.execute(
+                "INSERT INTO shadow_decisions(decision_id,symbol,action,quantity,bar_timestamp,decision) "
+                "VALUES($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT (decision_id) DO NOTHING",
+                decision_id,
+                symbol,
+                action,
+                quantity,
+                bar_timestamp,
+                json.dumps(decision, sort_keys=True, default=str),
+            )
+        except asyncpg.PostgresError as exc:
+            raise PersistenceUnavailable("shadow decision write failed") from exc
+
+    async def list_shadow_decisions(self) -> list[dict[str, Any]]:
+        """List persisted shadow decisions in recorded order."""
+        pool = self._require_pool()
+        try:
+            rows = await pool.fetch(
+                "SELECT decision_id, symbol, action, quantity, bar_timestamp, decision, recorded_at "
+                "FROM shadow_decisions ORDER BY recorded_at, decision_id"
+            )
+        except asyncpg.PostgresError as exc:
+            raise PersistenceUnavailable("shadow decision read failed") from exc
+        decisions: list[dict[str, Any]] = []
+        try:
+            for row in rows:
+                decision = dict(row)
+                if isinstance(decision.get("decision"), str):
+                    decision["decision"] = json.loads(decision["decision"])
+                decisions.append(decision)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise PersistenceUnavailable("shadow decision read failed") from exc
+        return decisions
+
     async def record_incident(
         self,
         incident_id: str,

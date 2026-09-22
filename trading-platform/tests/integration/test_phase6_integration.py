@@ -1,14 +1,11 @@
 """Phase 6 comprehensive integration test - Production OMS, Hard Risk Engine, Reconciliation."""
 
-import sys
-from datetime import datetime
-
-sys.path.insert(0, r"D:\hexabyte_technologies\easy-trading\trading-platform\src")
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from trading_platform.oms.oms import (
     OMS,
-    IdempotencyKey,
     OCAGroup,
     FakeBroker,
     OrderLifecycle,
@@ -20,6 +17,7 @@ from trading_platform.risk.risk_engine import (
     SessionScheduler,
 )
 from trading_platform.domain import (
+    BrokerSnapshot,
     Instrument,
     Order,
     OrderSide,
@@ -28,7 +26,6 @@ from trading_platform.domain import (
     Signal,
     OrderStatus,
 )
-from trading_platform.strategies.ma_cross_strategy import MaCrossHypothesis
 
 
 @pytest.mark.integration
@@ -79,7 +76,7 @@ def test_oms_state_machine_lifecycle():
 
 @pytest.mark.integration
 def test_oms_idempotency():
-    """Test idempotency key prevention of duplicate orders."""
+    """Duplicate submissions are rejected while the original order is pending."""
     oms = OMS(oms_id="idem_test")
     inst = Instrument(symbol="AAPL")
     signal = Signal(
@@ -104,13 +101,45 @@ def test_oms_idempotency():
 
     result = oms.submit_order(order)
     order1_id = order.order_id
+    assert result[0] is True
+    assert oms.get_order_status(order1_id) == "SUBMITTED"
 
-    # Submit with same key should be idempotent
-    # OMS uses order_id from the order object for idempotency
-    # Since we submit the same order object, it should be idempotent
-    result2 = oms.submit_order(order)
-    # The order object's order_id is the same
-    assert order.order_id == order1_id
+    duplicate = oms.submit_order(order)
+    assert duplicate[0] is False
+    assert "Duplicate submission" in duplicate[1]
+    assert len(oms.orders) == 1
+    assert oms.get_order_status(order1_id) == "SUBMITTED"
+
+    keyed = Order(
+        order_id="order-002",
+        instrument=inst,
+        side=OrderSide.BUY,
+        quantity=10,
+        price=None,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.DAY,
+        status=OrderStatus.SUBMITTED,
+        signal=signal,
+    )
+    keyed_result = oms.submit_order(keyed, "idem-key-1")
+    assert keyed_result[0] is True
+
+    conflicting = Order(
+        order_id="order-003",
+        instrument=inst,
+        side=OrderSide.BUY,
+        quantity=10,
+        price=None,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.DAY,
+        status=OrderStatus.SUBMITTED,
+        signal=signal,
+    )
+    conflicting_result = oms.submit_order(conflicting, "idem-key-1")
+    assert conflicting_result[0] is False
+    assert "Duplicate submission" in conflicting_result[1]
+    assert oms.get_order_status("order-002") == "SUBMITTED"
+    assert oms.get_order("order-003") is None
 
 
 @pytest.mark.integration
@@ -175,22 +204,53 @@ def test_hard_risk_engine():
 
 @pytest.mark.integration
 def test_reconciliation_engine():
-    """Test Reconciliation Engine."""
+    """Reconciliation derives from the durable ledger and fails closed on real mismatches."""
     oms = OMS(oms_id="recon-test")
     reconciliation = ReconciliationEngine(oms)
     assert len(reconciliation.errors) == 0
 
-    result = reconciliation.reconcile_all(
-        beginning_cash=10000.0,
-        expected_ending_cash=10000.0,
-        expected_positions={},
-        actual_positions={},
-        expected_fills=0,
-        actual_fills=0,
-        oms_orders={},
-        broker_orders={},
+    order = Order(
+        order_id="recon-order-001",
+        instrument=Instrument(symbol="AAPL"),
+        side=OrderSide.BUY,
+        quantity=5,
+        price=None,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.DAY,
+        status=OrderStatus.SUBMITTED,
+        signal=None,
     )
-    assert "overall_status" in result
+    oms.submit_order(order)
+    oms.accept_order("recon-order-001")
+    oms.open_order("recon-order-001")
+    oms.fill_order("recon-order-001", 5, 100.0, execution_id="exec-001", commission=1.0, slippage=0.0)
+
+    internal = reconciliation.build_internal_snapshot()
+    assert internal["fill_count"] == 1
+    assert internal["total_commission"] == 1.0
+    assert internal["positions"] == {"AAPL": 5.0}
+
+    snapshot = BrokerSnapshot(
+        timestamp=datetime.now(timezone.utc),
+        positions={Instrument(symbol="AAPL"): 5.0},
+        cash=10_000.0 - 500.0 - 1.0,
+        buying_power=9_499.0,
+    )
+    matched = reconciliation.reconcile_against_snapshot(snapshot, beginning_cash=10_000.0)
+    assert matched["overall_status"] == "PASS"
+    assert matched["blocks_new_orders"] is False
+
+    mismatched = BrokerSnapshot(
+        timestamp=datetime.now(timezone.utc),
+        positions={Instrument(symbol="AAPL"): 4.0},
+        cash=10_000.0 - 500.0 - 1.0,
+        buying_power=9_499.0,
+    )
+    failed = reconciliation.reconcile_against_snapshot(mismatched, beginning_cash=10_000.0)
+    assert failed["overall_status"] == "MISMATCH"
+    assert failed["blocks_new_orders"] is True
+    assert failed["operator_resolution_required"] is True
+    assert reconciliation.blocks_new_orders
 
 
 @pytest.mark.integration
@@ -206,9 +266,47 @@ def test_session_scheduler():
 
 @pytest.mark.integration
 def test_broker_contract():
-    """Test BrokerAdapter contract with fake broker."""
+    """Fake broker executes and cancels orders without destroying ledger history."""
     oms = OMS(oms_id="broker-contract-test")
-    fake_broker = FakeBroker(oms, fill_assumption="CLOSE")
+    fake_broker = FakeBroker(oms, fill_assumption="NEXT_OPEN")
 
     assert hasattr(fake_broker, "execute_order")
     assert hasattr(fake_broker, "cancel_all_orders")
+
+    inst = Instrument(symbol="AAPL")
+    filled = Order(
+        order_id="broker-order-001",
+        instrument=inst,
+        side=OrderSide.BUY,
+        quantity=1,
+        price=None,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.DAY,
+        status=OrderStatus.SUBMITTED,
+        signal=None,
+    )
+    oms.submit_order(filled)
+    execution = fake_broker.execute_order(filled, SimpleNamespace(open=102.0, close=103.0))
+    assert execution["status"] == "FILLED"
+    assert oms.get_order_status("broker-order-001") == "FILLED"
+
+    opened = Order(
+        order_id="broker-order-002",
+        instrument=inst,
+        side=OrderSide.BUY,
+        quantity=1,
+        price=None,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.DAY,
+        status=OrderStatus.SUBMITTED,
+        signal=None,
+    )
+    oms.submit_order(opened)
+    oms.accept_order("broker-order-002")
+    oms.open_order("broker-order-002")
+
+    events_before_cancel = len(oms.get_event_ledger())
+    assert events_before_cancel > 0
+    fake_broker.cancel_all_orders()
+    assert oms.get_order_status("broker-order-002") == "CANCELLED"
+    assert len(oms.get_event_ledger()) == events_before_cancel + 1
