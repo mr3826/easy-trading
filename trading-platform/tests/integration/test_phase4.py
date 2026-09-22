@@ -68,12 +68,12 @@ def test_position_limit():
 def test_buying_power():
     """Test buying power check."""
     # Enough cash
-    ok, reason = check_buying_power(10, 100.0, 1500.0, {})
+    ok, reason = check_buying_power(10, 100.0, 1500.0, {}, 1.0)
     assert ok is True
     assert "Insufficient" not in reason
 
     # Not enough cash
-    ok2, reason2 = check_buying_power(100, 100.0, 500.0, {})
+    ok2, reason2 = check_buying_power(100, 100.0, 500.0, {}, 1.0)
     assert ok2 is False
     assert "Insufficient" in reason2
 
