@@ -1,4 +1,4 @@
-"""Engineering baseline report for Phase 4 research harness.
+"""Engineering baseline report.
 
 Produces a fixed-symbol baseline report (system test only, NOT strategy evidence).
 
@@ -13,31 +13,23 @@ Per ADR V1 and exit gate G4/S1:
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Dict, List, Optional
+import json
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from trading_platform.domain import Instrument, Position, Bar
-from trading_platform.simulator.event_driven_simulator import (
-    EventDrivenSimulator,
-    SimulationMode,
-    FillAssumption,
-)
+from trading_platform.domain import Position
+from trading_platform.simulator.event_driven_simulator import EventDrivenSimulator, SimulationResult
 from trading_platform.strategies.ma_cross_strategy import (
     MaCrossHypothesis,
-    generate_signal,
-    hypothesis_to_dict,
 )
-
 
 # ---------------------------------------------------------------------------
 # Performance metrics
 
 
-def compute_expectancy(
-    win_trades: List[float], loss_trades: List[float]
-) -> Optional[float]:
+def compute_expectancy(win_trades: List[float], loss_trades: List[float]) -> Optional[float]:
     """Compute expectancy: expected value per trade.
 
     Expectancy = (win_rate * avg_win) - (loss_rate * avg_loss)
@@ -61,16 +53,16 @@ def compute_profit_factor(win_trades: List[float], loss_trades: List[float]) -> 
 
 
 def compute_sharpe(returns: List[float], risk_free: float = 0.0) -> Optional[float]:
-    """Compute annualized Sharpe ratio (V1: simplified monthly -> annualized)."""
+    """Compute annualized Sharpe ratio (V1: daily returns annualized with sqrt(252))."""
     if len(returns) < 2:
         return None
-    returns = np.array(returns, dtype=float)
-    excess = returns - risk_free / len(returns)  # simplified daily
+    return_array = np.array(returns, dtype=float)
+    excess = return_array - risk_free / len(return_array)  # simplified daily
     if np.std(excess) == 0:
         return None
     # Annualized: sqrt(252) for daily, sqrt(12) for monthly
     daily_sharpe = np.mean(excess) / np.std(excess)
-    annual_sharpe = daily_sharpe * (252 ** 0.5)  # assuming daily returns
+    annual_sharpe = daily_sharpe * (252**0.5)  # assuming daily returns
     return round(annual_sharpe, 4)
 
 
@@ -78,13 +70,13 @@ def compute_sortino(returns: List[float], target: float = 0.0) -> Optional[float
     """Compute annualized Sortino ratio."""
     if len(returns) < 2:
         return None
-    returns = np.array(returns, dtype=float)
-    excess = returns - target
+    return_array = np.array(returns, dtype=float)
+    excess = return_array - target
     downside = np.std(excess[excess < 0])
     if downside == 0:
         return None
     daily_sortino = np.mean(excess) / downside
-    annual_sortino = daily_sortino * (252 ** 0.5)
+    annual_sortino = daily_sortino * (252**0.5)
     return round(annual_sortino, 4)
 
 
@@ -103,9 +95,16 @@ def compute_max_drawdown(equity_curve: List[float]) -> float:
     return round(max_dd, 4)
 
 
-def compute_turnover(total_buy: int, total_sell: int) -> float:
-    """Compute total turnover ratio."""
-    return float(total_buy + total_sell)
+def compute_turnover(total_buy: int, total_sell: int, equity: Optional[float] = None) -> float:
+    """Compute turnover: traded share volume relative to an equity base.
+
+    Returns (total_buy + total_sell) / equity when an equity base is
+    provided; otherwise the raw traded share count.
+    """
+    traded = float(total_buy + total_sell)
+    if equity is None or equity <= 0:
+        return traded
+    return round(traded / equity, 4)
 
 
 def compute_win_loss_distribution(
@@ -118,7 +117,7 @@ def compute_win_loss_distribution(
 
 
 def compute_mae_mfe(
-    trades: List[dict],
+    trades: List[Dict[str, Any]],
 ) -> Dict[str, float]:
     """Compute Mean Absolute Error and Maximum Favorable Exposure.
 
@@ -150,7 +149,7 @@ def compute_mae_mfe(
 def compute_concentration(
     positions: Dict[str, Position],
     sector_map: Optional[Dict[str, str]] = None,
-) -> Dict[str, any]:
+) -> Dict[str, Any]:
     """Compute position concentration metrics.
 
     Returns: herfindahl_index, top_symbol, top_pct, sector_counts
@@ -208,14 +207,14 @@ class EngineeringBaselineReport:
         self,
         hypothesis: MaCrossHypothesis,
         simulator: EventDrivenSimulator,
-        result: any,  # SimulationResult
+        result: SimulationResult,
         sector_map: Optional[Dict[str, str]] = None,
     ):
         self.hypothesis = hypothesis
         self.simulator = simulator
         self.result = result
         self.sector_map = sector_map
-        self.timestamp = datetime.utcnow()
+        self.timestamp = datetime.now(timezone.utc)
 
     # -----------------------------------------------------------------
     # Core metrics
@@ -242,6 +241,40 @@ class EngineeringBaselineReport:
             return 0.0
         return (end - start) / start
 
+    def _get_equity_curve(self) -> List[float]:
+        """Equity per recorded snapshot: cash plus marked position value.
+
+        Position market values are marked at fill price and not re-marked to
+        later bars, so this curve is an approximation of economic equity.
+        """
+        curve = []
+        for snapshot in self.result.portfolio_series:
+            market_value = sum(pos.market_value for pos in snapshot.positions.values())
+            curve.append(snapshot.cash + market_value)
+        return curve
+
+    def _get_turnover(self) -> float:
+        """Turnover from the trade ledger, relative to starting equity."""
+        total_buy = 0
+        total_sell = 0
+        for event in self.result.trade_ledger:
+            if event.event_type == "FILL":
+                detail = event.detail or {}
+                fill_qty = int(detail.get("fill_quantity", 0))
+                if fill_qty > 0:
+                    total_buy += fill_qty
+                elif fill_qty < 0:
+                    total_sell += abs(fill_qty)
+        return compute_turnover(total_buy, total_sell, equity=self._get_starting_cash())
+
+    def _get_gross_exposure_pct(self) -> Optional[float]:
+        """Gross exposure as a percentage of economic equity (cash + market value)."""
+        gross = float(self.result.final_portfolio.gross_exposure)
+        equity = self._get_final_cash() + sum(pos.market_value for pos in self.result.final_positions.values())
+        if equity <= 0:
+            return None
+        return round(gross / equity * 100, 2)
+
     # -----------------------------------------------------------------
     # Trade-level metrics
 
@@ -264,23 +297,25 @@ class EngineeringBaselineReport:
     def _get_mae_mfe(self) -> Dict[str, float]:
         return compute_mae_mfe(self._get_trade_details())
 
-    def _get_trade_details(self) -> List[dict]:
+    def _get_trade_details(self) -> List[Dict[str, Any]]:
         """Extract trade details from trade ledger for MAE/MFE calculation."""
         trades = []
         for event in self.result.trade_ledger:
             if event.event_type == "FILL":
                 detail = event.detail or {}
-                trades.append({
-                    "entry_price": detail.get("fill_price", 0.0),
-                    "exit_price": detail.get("fill_price", 0.0),  # simplified
-                    "qty": detail.get("fill_quantity", 0),
-                })
+                trades.append(
+                    {
+                        "entry_price": detail.get("fill_price", 0.0),
+                        "exit_price": detail.get("fill_price", 0.0),  # simplified
+                        "qty": detail.get("fill_quantity", 0),
+                    }
+                )
         return trades
 
     # -----------------------------------------------------------------
     # Concentration
 
-    def _get_concentration(self) -> Dict[str, any]:
+    def _get_concentration(self) -> Dict[str, Any]:
         # Positions are in the final portfolio
         positions = dict(self.result.final_positions)
         return compute_concentration(positions, self.sector_map)
@@ -288,7 +323,7 @@ class EngineeringBaselineReport:
     # -----------------------------------------------------------------
     # Generate full report
 
-    def generate(self) -> Dict[str, any]:
+    def generate(self) -> Dict[str, Any]:
         """Generate the complete engineering baseline report."""
         pnls = []
         for event in self.result.trade_ledger:
@@ -311,8 +346,6 @@ class EngineeringBaselineReport:
 
         # Compute simple returns series from portfolio state
         # (simplified: use final cash vs starting)
-        starting_cash = self._get_starting_cash()
-        final_cash = self._get_final_cash()
         total_return = self._get_total_return()
 
         # Expectancy and profit factor
@@ -360,13 +393,11 @@ class EngineeringBaselineReport:
             },
             # Risk metrics
             "risk": {
-                "max_drawdown": None,  # would need full equity curve
-                "turnover": None,  # would need cumulative turnover
+                "max_drawdown": compute_max_drawdown(self._get_equity_curve()),
+                "turnover": self._get_turnover(),
                 "concentration": concentration,
-                "gross_exposure_pct": None,  # would need equity base
-                "cash_reserve_pct": round(
-                    (_get_final_cash() / _get_starting_cash()) * 100, 2
-                ),
+                "gross_exposure_pct": self._get_gross_exposure_pct(),
+                "cash_reserve_pct": round((self._get_final_cash() / self._get_starting_cash()) * 100, 2),
             },
             # MAE/MFE
             "mae_mfe": mae_mfe,
@@ -377,8 +408,8 @@ class EngineeringBaselineReport:
             },
             # Determinism verification
             "determinism": {
-                "replay_consistent": None,  # set by test harness
-                "seed": self.simulator._seed if hasattr(self.simulator, "_seed") else None,
+                "replay_consistent": None,  # verified by the harness via deterministic reruns
+                "seed": getattr(self.simulator, "seed", None),
             },
             # Generation metadata
             "generated_at": self.timestamp.isoformat() + "Z",

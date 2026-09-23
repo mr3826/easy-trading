@@ -1,30 +1,23 @@
 from __future__ import annotations
 
-from collections.abc import MutableMapping
-from dataclasses import dataclass
-from dataclasses import replace
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal, ROUND_DOWN
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from decimal import Decimal
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
-from trading_platform.data import CorporateAction, CorporateActionType
-from trading_platform.data.ingestion import validate_data_integrity
 from trading_platform.domain import (
     Bar,
-    OrderIntent,
-    Order,
-    CorporateAction,
     Instrument,
-    OrderStatus,
+    Order,
+    OrderIntent,
     OrderSide,
+    OrderStatus,
     OrderType,
     PortfolioSnapshot,
     Position,
     RiskDecision,
     Signal,
-    TimeInForce,
-    TradingSession,
 )
 
 
@@ -39,9 +32,9 @@ class SimulationMode(Enum):
 class FillAssumption(Enum):
     """Assumptions about order fill behavior."""
 
-    CLOSE = "close"  # Execute at bar close price
+    CLOSE = "close"  # Retained only to reject unsafe legacy configuration
     NEXT_OPEN = "next_open"  # Execute at next open price
-    MARKET = "market"  # Execute at prevailing market price
+    MARKET = "market"  # Execute at next open price (same-bar close is lookahead for completed-bar decisions)
     LIMIT = "limit"  # Execute at limit price or better
 
 
@@ -64,6 +57,7 @@ class FillResult:
     timestamp: datetime
     execution_id: str
     remaining_quantity: int  # Quantity not filled (for partial fills)
+    realized_pnl: float  # Realized PnL closed by this fill
 
 
 @dataclass(frozen=True)
@@ -105,13 +99,21 @@ class EventDrivenSimulator:
         commission_model: CommissionModel = CommissionModel.FIXED,
         commission_rate: float = 1.0,
         start_cash: float = 10000.0,
-        fill_assumption: FillAssumption = FillAssumption.CLOSE,
+        fill_assumption: FillAssumption = FillAssumption.NEXT_OPEN,
+        seed: int = 0,
+        max_positions: int = 3,
     ):
         self.mode = mode
         self.commission_model = commission_model
         self.commission_rate = commission_rate
         self.start_cash = start_cash
         self.fill_assumption = fill_assumption
+        self.seed = seed
+        if max_positions <= 0:
+            raise ValueError("max_positions must be positive")
+        self.max_positions = max_positions
+        if fill_assumption == FillAssumption.CLOSE:
+            raise ValueError("CLOSE execution is unsafe for completed-bar decisions; use NEXT_OPEN")
 
         # State
         self.cash: float = start_cash
@@ -119,9 +121,7 @@ class EventDrivenSimulator:
         self.order_ledger: List[OrderEvent] = []
         self.trade_ledger: List[OrderEvent] = []
         self.portfolio_series: List[PortfolioSnapshot] = []
-        self.event_timestamp: datetime = datetime.min.replace(
-            tzinfo=timezone.utc
-        )
+        self.event_timestamp: datetime = datetime.min.replace(tzinfo=timezone.utc)
 
         # Tracking
         self.fill_count = 0
@@ -135,22 +135,16 @@ class EventDrivenSimulator:
     def run(
         self,
         bars: List[Bar],
-        signals: List[Signal],
+        signals: List[Signal | None],
         initial_portfolio: PortfolioSnapshot | None = None,
     ) -> SimulationResult:
         """Run the event-driven simulation.
 
         The event loop processes bars in timestamp order, modeling the full
-        strategy → risk → OMS → execution pipeline. Signals are processed
-        sequentially, one per bar, in the order provided.
-
-        Args:
-            bars: Daily bar data for the simulation period
-            signals: Order signals to execute (one per bar, in order)
-            initial_portfolio: Starting portfolio state
-
-        Returns:
-            SimulationResult with all state and reports
+        strategy → risk → OMS → execution pipeline. Signals must contain one
+        entry per bar, in bar order: signals[i] is generated from completed
+        bar i and executes on bar i+1; None entries mean no signal for that
+        bar.
         """
         # Initialize state
         if initial_portfolio:
@@ -172,30 +166,15 @@ class EventDrivenSimulator:
         # Sort bars by timestamp
         sorted_bars = sorted(bars, key=lambda b: b.timestamp)
 
-        # Process bars and signals in order
-        # Signals are matched one-to-one with bars in provided order
-        signal_idx = 0
-        total_signals = len(signals)
-
-        bar_idx = 0
-        while bar_idx < len(sorted_bars):
-            bar = sorted_bars[bar_idx]
-
-            # Get the signal for this bar (if available)
-            signal = signals[signal_idx] if signal_idx < total_signals else None
-            signal_idx += 1
-
-            # Process the bar with its associated signal
-            self._process_bar(bar, signal)
+        # A signal made from completed bar D becomes eligible on the next bar.
+        pending_signal: Signal | None = None
+        for signal_idx, bar in enumerate(sorted_bars):
+            signal_number = signal_idx + 1
+            self._process_bar(bar, pending_signal, signal_number)
+            pending_signal = signals[signal_idx] if signal_idx < len(signals) else None
 
             # Record portfolio state after bar processing
             self._record_portfolio_state(bar.timestamp)
-
-            bar_idx += 1
-
-        # Process any remaining signals after last bar
-        # (signals without corresponding bars are ignored in V1)
-        # No additional portfolio state recording needed - already recorded
 
         return SimulationResult(
             final_portfolio=self._make_portfolio_snapshot(
@@ -212,52 +191,68 @@ class EventDrivenSimulator:
 
     # ---- Bar processing ----
 
-    def _process_bar(self, bar: Bar, signal: Signal | None) -> None:
+    def _process_bar(self, bar: Bar, signal: Signal | None, signal_number: int = 0) -> None:
         """Process a single bar with an associated signal (or None)."""
 
         self.event_timestamp = bar.timestamp
 
-        if signal is None:
-            # No signal for this bar - record portfolio state, no orders
-            self._record_portfolio_state(bar.timestamp)
+        if bar.available_at is not None and bar.available_at > bar.timestamp:
+            if signal is not None:
+                self.order_ledger.append(
+                    OrderEvent(
+                        event_type="DATA_REJECTED",
+                        timestamp=self.event_timestamp,
+                        order_id=f"data-{self.event_timestamp.timestamp()}-{signal_number}",
+                        instrument=bar.instrument,
+                        detail={
+                            "reason": "bar was not point-in-time available at its decision timestamp",
+                            "available_at": bar.available_at.isoformat(),
+                        },
+                    )
+                )
             return
 
-        self._handle_signal(signal, bar)
+        if signal is None:
+            # No signal for this bar - no orders; run() records portfolio state
+            return
 
-    def _handle_signal(self, signal: Signal, bar: Bar) -> None:
+        self._handle_signal(signal, bar, signal_number)
+
+    def _handle_signal(self, signal: Signal, bar: Bar, signal_number: int) -> None:
         """Handle a single trading signal through the pipeline."""
 
-        # 1. Signal generation (already done, now pipeline processing)
+        # 1. Signal record (the signal was generated from completed bars)
         self.order_ledger.append(
             OrderEvent(
                 event_type="SIGNAL",
                 timestamp=self.event_timestamp,
-                order_id=f"signal-{self.event_timestamp.timestamp()}-{id(signal)}",
+                order_id=f"signal-{self.event_timestamp.timestamp()}-{signal_number}",
                 instrument=signal.instrument,
                 detail={"signal": signal.side.name, "quantity": signal.quantity},
             )
         )
 
-        # 2. Risk engine check
-        risk_decision = self._risk_engine(signal)
+        # 2. Order intent creation (before the risk check so every decision
+        # references the real intent)
+        order_intent = OrderIntent(
+            signal=signal,
+            order_id=f"order-{self.event_timestamp.timestamp()}",
+        )
+
+        # 3. Risk engine check
+        risk_decision = self._risk_engine(signal, order_intent, bar)
         if not risk_decision.approved:
             self.reject_count += 1
             self.order_ledger.append(
                 OrderEvent(
                     event_type="RISK_REJECTION",
                     timestamp=self.event_timestamp,
-                    order_id=signal.instrument.symbol,
+                    order_id=order_intent.order_id,
                     instrument=signal.instrument,
                     detail={"reason": risk_decision.reason},
                 )
             )
             return
-
-        # 3. Order intent creation
-        order_intent = OrderIntent(
-            signal=signal,
-            order_id=f"order-{self.event_timestamp.timestamp()}",
-        )
 
         # 4. OMS order creation
         order = Order(
@@ -292,7 +287,7 @@ class EventDrivenSimulator:
         fill_result = self._execute_order(order, bar)
 
         # 6. Fill processing - already handled in _execute_order (position update, cash, etc.)
-        if fill_result.fill_quantity > 0:
+        if fill_result.fill_quantity != 0:
             # Record in trade ledger
             self.trade_ledger.append(
                 OrderEvent(
@@ -304,6 +299,7 @@ class EventDrivenSimulator:
                         "fill_quantity": fill_result.fill_quantity,
                         "fill_price": fill_result.fill_price,
                         "fill_commission": fill_result.fill_commission,
+                        "realized_pnl": fill_result.realized_pnl,
                     },
                 )
             )
@@ -323,7 +319,7 @@ class EventDrivenSimulator:
 
     # ---- Risk engine ----
 
-    def _risk_engine(self, signal: Signal) -> RiskDecision:
+    def _risk_engine(self, signal: Signal, order_intent: OrderIntent, bar: Bar) -> RiskDecision:
         """Run the risk engine on a signal.
 
         Checks:
@@ -337,64 +333,71 @@ class EventDrivenSimulator:
         side = signal.side
 
         # Get current position
-        current_pos = self.positions.get(instrument.symbol, Position(
-            instrument=instrument,
-            quantity=0,
-            average_cost=0.0,
-            market_value=0.0,
-            unrealized_pnl=0.0,
-            realized_pnl=0.0,
-        ))
-
-        # Calculate target position
-        target_qty = current_pos.quantity + (
-            quantity if side == OrderSide.BUY else -quantity
+        current_pos = self.positions.get(
+            instrument.symbol,
+            Position(
+                instrument=instrument,
+                quantity=0,
+                average_cost=0.0,
+                market_value=0.0,
+                unrealized_pnl=0.0,
+                realized_pnl=0.0,
+            ),
         )
 
-        # Check position limit (V1: max 3 positions)
-        position_count = len(self.positions)
-        if position_count >= 3 and target_qty != current_pos.quantity:
+        # Long-only: a sell cannot create a short position.
+        if side == OrderSide.SELL and current_pos.quantity < quantity:
             return RiskDecision(
-                order_intent=OrderIntent(signal=signal, order_id="dummy"),
+                order_intent=order_intent,
                 approved=False,
-                reason="Max position count (3) reached",
+                reason=f"Long-only violation: held {current_pos.quantity}, requested sell {quantity}",
+                policy_version="simulator-v1",
+            )
+
+        # Check position limit for new positive exposure; exits remain allowed.
+        position_count = len(self.positions)
+        if side == OrderSide.BUY and position_count >= self.max_positions and current_pos.quantity == 0:
+            return RiskDecision(
+                order_intent=order_intent,
+                approved=False,
+                reason=f"Max position count ({self.max_positions}) reached",
+                policy_version="simulator-v1",
             )
 
         # Cash check for BUY orders
-        if side == OrderSide.BUY and signal.price is not None:
+        estimated_price = signal.price if signal.price is not None else bar.open
+        if side == OrderSide.BUY:
             # Estimate cost including commission
-            estimated_cost = abs(quantity) * signal.price
-            estimated_commission = float(self._estimate_commission(
-                abs(quantity), signal.price
-            ))
+            estimated_cost = abs(quantity) * estimated_price
+            estimated_commission = float(self._estimate_commission(abs(quantity), estimated_price))
             total_cost = estimated_cost + estimated_commission
 
             if self.cash < total_cost:
                 return RiskDecision(
-                    order_intent=OrderIntent(signal=signal, order_id="dummy"),
+                    order_intent=order_intent,
                     approved=False,
                     reason=f"Insufficient cash: need {total_cost:.2f}, have {self.cash:.2f}",
                     position_notional=estimated_cost,
+                    policy_version="simulator-v1",
                 )
 
         # Check sector concentration (simplified: just count positions)
         # In V1 with max 3 positions, this is inherently limited
 
         # Approve
-        position_notional = abs(quantity) * (signal.price or 0)
+        position_notional = abs(quantity) * estimated_price
 
         return RiskDecision(
-            order_intent=OrderIntent(signal=signal, order_id="dummy"),
+            order_intent=order_intent,
             approved=True,
             reason="Within risk limits",
             position_notional=position_notional,
+            policy_version="simulator-v1",
         )
 
     # ---- Order execution ----
 
-    def _execute_order(
-        self, order: Order, bar: Bar
-    ) -> FillResult:
+    def _execute_order(self, order: Order, bar: Bar) -> FillResult:
         """Execute an order modeled by the fill assumption.
 
         Models:
@@ -410,25 +413,43 @@ class EventDrivenSimulator:
         side = order.side
         price = order.price
 
+        if not self._is_order_eligible(order, bar):
+            return FillResult(
+                fill_quantity=0,
+                fill_price=0.0,
+                fill_commission=0.0,
+                fill_cost=0.0,
+                timestamp=self.event_timestamp,
+                execution_id=f"unfilled-{self.event_timestamp.timestamp()}-{order.order_id}",
+                remaining_quantity=quantity,
+                realized_pnl=0.0,
+            )
+
         # Determine fill price based on assumption
-        fill_price = self._calculate_fill_price(price, bar, side)
+        fill_price = self._calculate_fill_price(price, bar, side, order.order_type)
 
         # Calculate actual quantity filled
         # For V1 cash account with whole-share quantization
         actual_qty = self._quantize_shares(quantity, side, fill_price, bar)
 
-        # Calculate commission
+        # Calculate commission; a zero-share execution is not a fill and
+        # cannot incur a fee.
         commission = self._estimate_commission(abs(actual_qty), fill_price)
 
         # Calculate slippage (difference between signal intent and fill)
         slippage = Decimal("0")
-        if price is not None and side == OrderSide.BUY:
-            # For a buy order, slippage = fill_price - signal_price (positive = bad)
-            if fill_price > price:
-                slippage = fill_price - price
+        if price is not None:
+            if side == OrderSide.BUY and fill_price > price:
+                # For a buy order, slippage = fill_price - signal_price (positive = bad)
+                slippage = Decimal(str(fill_price - price))
+            elif side == OrderSide.SELL and fill_price < price:
+                # For a sell order, slippage = signal_price - fill_price (positive = bad)
+                slippage = Decimal(str(price - fill_price))
 
-        # Calculate total cost
-        fill_cost = fill_price * abs(actual_qty) + float(commission)
+        # Calculate net cash impact. Sell commission reduces proceeds; it is
+        # never added to cash as if it were additional sale value.
+        gross_notional = fill_price * abs(actual_qty)
+        fill_cost = gross_notional + float(commission) if side == OrderSide.BUY else gross_notional - float(commission)
 
         # Cash update
         if side == OrderSide.BUY:
@@ -437,14 +458,17 @@ class EventDrivenSimulator:
             self.cash += fill_cost
 
         # Position update
-        current_pos = self.positions.get(instrument.symbol, Position(
-            instrument=instrument,
-            quantity=0,
-            average_cost=0.0,
-            market_value=0.0,
-            unrealized_pnl=0.0,
-            realized_pnl=0.0,
-        ))
+        current_pos = self.positions.get(
+            instrument.symbol,
+            Position(
+                instrument=instrument,
+                quantity=0,
+                average_cost=0.0,
+                market_value=0.0,
+                unrealized_pnl=0.0,
+                realized_pnl=0.0,
+            ),
+        )
 
         # Update position
         new_qty = current_pos.quantity + actual_qty
@@ -456,9 +480,7 @@ class EventDrivenSimulator:
             else:
                 total_cost_basis = current_pos.average_cost * abs(current_pos.quantity)
                 new_total_cost = total_cost_basis + (fill_price * abs(actual_qty))
-                new_avg_cost = (
-                    new_total_cost / abs(new_qty) if new_qty != 0 else 0
-                )
+                new_avg_cost = new_total_cost / abs(new_qty) if new_qty != 0 else 0
         else:
             new_avg_cost = current_pos.average_cost
 
@@ -468,21 +490,15 @@ class EventDrivenSimulator:
 
         # Realized PnL from this trade (only if reducing or closing position)
         realized_from_this = Decimal("0")
-        if (current_pos.quantity > 0 and actual_qty < 0) or (
-            current_pos.quantity < 0 and actual_qty > 0
-        ):
+        if (current_pos.quantity > 0 and actual_qty < 0) or (current_pos.quantity < 0 and actual_qty > 0):
             # Closing an existing position - calculate realized PnL
             close_qty = min(abs(current_pos.quantity), abs(actual_qty))
             if side == OrderSide.SELL and current_pos.quantity > 0:
-                realized_from_this = (
-                    fill_price - current_pos.average_cost
-                ) * close_qty
+                realized_from_this = Decimal(str((fill_price - current_pos.average_cost) * close_qty))
             elif side == OrderSide.BUY and current_pos.quantity < 0:
-                realized_from_this = (
-                    current_pos.average_cost - fill_price
-                ) * close_qty
+                realized_from_this = Decimal(str((current_pos.average_cost - fill_price) * close_qty))
 
-# Create updated position
+        # Create updated position
         new_position = Position(
             instrument=instrument,
             quantity=new_qty,
@@ -510,49 +526,78 @@ class EventDrivenSimulator:
             timestamp=self.event_timestamp,
             execution_id=execution_id,
             remaining_quantity=quantity - actual_qty,  # For partial fills
+            realized_pnl=float(realized_from_this),
         )
 
     # ---- Fill price calculation ----
 
+    def _is_order_eligible(self, order: Order, bar: Bar) -> bool:
+        """Determine whether an order's trigger/limit was touched by the bar."""
+        if order.order_type == OrderType.MARKET:
+            return True
+        if order.price is None:
+            return False
+        if order.order_type == OrderType.LIMIT:
+            return bar.low <= order.price if order.side == OrderSide.BUY else bar.high >= order.price
+        if order.order_type == OrderType.STOP:
+            return bar.high >= order.price if order.side == OrderSide.BUY else bar.low <= order.price
+        if order.order_type == OrderType.STOP_LIMIT:
+            triggered = bar.high >= order.price if order.side == OrderSide.BUY else bar.low <= order.price
+            return triggered and (bar.low <= order.price if order.side == OrderSide.BUY else bar.high >= order.price)
+        return False
+
     def _calculate_fill_price(
-        self, signal_price: float | None, bar: Bar, side: OrderSide
+        self,
+        signal_price: float | None,
+        bar: Bar,
+        side: OrderSide,
+        order_type: OrderType = OrderType.MARKET,
     ) -> float:
         """Calculate the actual fill price based on the fill assumption.
 
         V1 fill assumptions:
-        - CLOSE: execute at bar close price
+        - CLOSE: prohibited (raises)
         - NEXT_OPEN: execute at next bar's open price
-        - MARKET: execute at prevailing market price (close + slippage)
+        - MARKET: execute at the next bar's open price (same-bar close would be lookahead)
         - LIMIT: execute at limit price or better
         """
         if fill_assumption := self.fill_assumption:
             if fill_assumption == FillAssumption.CLOSE:
-                return bar.close
+                raise ValueError("CLOSE execution is prohibited")
 
             elif fill_assumption == FillAssumption.NEXT_OPEN:
-                # Would need next bar - for now return close as placeholder
-                # In a full implementation, look ahead to next bar's open
-                return bar.close  # Placeholder
+                if signal_price is None or order_type == OrderType.MARKET:
+                    return bar.open
+                if order_type in (OrderType.LIMIT, OrderType.STOP_LIMIT):
+                    return min(bar.open, signal_price) if side == OrderSide.BUY else max(bar.open, signal_price)
+                if side == OrderSide.BUY:
+                    return max(bar.open, signal_price)
+                return min(bar.open, signal_price)
 
             elif fill_assumption == FillAssumption.MARKET:
-                # Market order: execute at close with slippage
-                # Slippage modeled as small random deviation or fixed percent
-                slippage_pct = Decimal("0.001")  # 0.1% default
-                adj = bar.close * float(slippage_pct)
-                return bar.close + adj if side == OrderSide.BUY else bar.close - adj
+                # Market order: fills at the next bar's open, consistent with
+                # NEXT_OPEN. Filling at the same bar's close would allow a
+                # signal derived from that close to trade on stale prices.
+                if signal_price is None or order_type == OrderType.MARKET:
+                    return bar.open
+                if order_type in (OrderType.LIMIT, OrderType.STOP_LIMIT):
+                    return min(bar.open, signal_price) if side == OrderSide.BUY else max(bar.open, signal_price)
+                if side == OrderSide.BUY:
+                    return max(bar.open, signal_price)
+                return min(bar.open, signal_price)
 
             elif fill_assumption == FillAssumption.LIMIT:
                 # Limit order: execute at signal price or better
                 # If signal_price is above/below market, may not fill
-                return signal_price if signal_price is not None else bar.close
+                if signal_price is None:
+                    raise ValueError("limit execution requires a limit price")
+                return signal_price
 
         return bar.close  # Default fallback
 
     # ---- Whole-share quantization ----
 
-    def _quantize_shares(
-        self, quantity: int, side: OrderSide, fill_price: float, bar: Bar
-    ) -> int:
+    def _quantize_shares(self, quantity: int, side: OrderSide, fill_price: float, bar: Bar) -> int:
         """Quantize order quantity to whole shares.
 
         V1: Only whole shares trade. Round toward zero for partial results.
@@ -570,19 +615,19 @@ class EventDrivenSimulator:
         if side == OrderSide.BUY and self.cash < total_cost:
             # Can't afford full quantity - reduce to what we can afford
             affordable = max(0, int((self.cash - estimated_commission) / fill_price))
-            return -affordable if side == OrderSide.SELL else affordable
+            return affordable
 
         return qty if side == OrderSide.BUY else -qty
 
     # ---- Commission calculation ----
 
-    def _estimate_commission(
-        self, qty: int, price: float
-    ) -> Decimal:
+    def _estimate_commission(self, qty: int, price: float) -> Decimal:
         """Estimate commission for an order.
 
         V1: Fixed commission model - $1.00 per order.
         """
+        if qty <= 0:
+            return Decimal("0")
         if self.commission_model == CommissionModel.FIXED:
             return Decimal(str(self.commission_rate))
         elif self.commission_model == CommissionModel.PER_SHARE:
@@ -597,25 +642,16 @@ class EventDrivenSimulator:
         """Record a portfolio snapshot at the given timestamp."""
 
         # Calculate gross and net exposure
-        long_exposure = sum(
-            pos.market_value for pos in self.positions.values() if pos.quantity > 0
-        )
-        short_exposure = sum(
-            abs(pos.market_value) for pos in self.positions.values() if pos.quantity < 0
-        )
+        long_exposure = sum(pos.market_value for pos in self.positions.values() if pos.quantity > 0)
+        short_exposure = sum(abs(pos.market_value) for pos in self.positions.values() if pos.quantity < 0)
         gross_exposure = long_exposure + short_exposure
         net_exposure = long_exposure - short_exposure
 
         # Total portfolio value
-        total_value = self.cash + gross_exposure
 
         # Total PnL (unrealized only in simulation without reference prices)
-        total_unrealized = sum(
-            pos.unrealized_pnl for pos in self.positions.values()
-        )
-        total_realized = sum(
-            pos.realized_pnl for pos in self.positions.values()
-        )
+        total_unrealized = sum(pos.unrealized_pnl for pos in self.positions.values())
+        total_realized = sum(pos.realized_pnl for pos in self.positions.values())
 
         snapshot = PortfolioSnapshot(
             timestamp=timestamp,
@@ -631,21 +667,12 @@ class EventDrivenSimulator:
     def _make_portfolio_snapshot(self, timestamp: datetime) -> PortfolioSnapshot:
         """Make a final portfolio snapshot."""
 
-        long_exposure = sum(
-            pos.market_value for pos in self.positions.values() if pos.quantity > 0
-        )
-        short_exposure = sum(
-            abs(pos.market_value) for pos in self.positions.values() if pos.quantity < 0
-        )
+        long_exposure = sum(pos.market_value for pos in self.positions.values() if pos.quantity > 0)
+        short_exposure = sum(abs(pos.market_value) for pos in self.positions.values() if pos.quantity < 0)
         gross_exposure = long_exposure + short_exposure
         net_exposure = long_exposure - short_exposure
-        total_value = self.cash + gross_exposure
-        total_unrealized = sum(
-            pos.unrealized_pnl for pos in self.positions.values()
-        )
-        total_realized = sum(
-            pos.realized_pnl for pos in self.positions.values()
-        )
+        total_unrealized = sum(pos.unrealized_pnl for pos in self.positions.values())
+        total_realized = sum(pos.realized_pnl for pos in self.positions.values())
 
         return PortfolioSnapshot(
             timestamp=timestamp,
@@ -666,7 +693,7 @@ class SimulationResult:
     order_ledger: List[OrderEvent]
     portfolio_series: List[PortfolioSnapshot]
     final_cash: float
-    final_positions: Dict[Instrument, Position]
+    final_positions: Dict[str, Position]
     total_commission: float
     total_slippage: float
 

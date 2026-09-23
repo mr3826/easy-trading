@@ -1,0 +1,21 @@
+{
+  "commit": "7f7cab653d1c791aba426a68327e3bbdb577d741",
+  "generated_utc": "2026-09-22T23:18:27.764918+00:00",
+  "command": "dedicated verification commands in this bundle",
+  "exit_code": 0,
+  "statuses": {
+    "0": "IMPLEMENTED_UNVERIFIED",
+    "1": "PARTIAL",
+    "2": "PARTIAL",
+    "3": "CI_VERIFIED",
+    "4": "CI_VERIFIED",
+    "5": "PARTIAL",
+    "6": "CI_VERIFIED",
+    "7": "CI_VERIFIED",
+    "8": "PARTIAL",
+    "9": "REQUIRES_EXTERNAL_SETUP",
+    "10": "REQUIRES_FORWARD_EVIDENCE",
+    "11": "PARTIAL",
+    "12": "NOT_AUTHORIZED"
+  }
+}

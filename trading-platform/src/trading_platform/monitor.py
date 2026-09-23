@@ -8,15 +8,136 @@ to testing/shadow/live-monitor mode.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
+import json
 import logging
+import os
+import shutil
+import smtplib
+import tempfile
+import time
+from datetime import datetime, timezone
+from email.message import EmailMessage
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 # ---------------------------------------------------------------------------
 # Module-level logger
 # ---------------------------------------------------------------------------
 
 logger = logging.getLogger("trading_platform.monitor")
+
+
+class AlertChannel(Protocol):
+    """Independent critical-alert transport."""
+
+    def send(self, message: str) -> None: ...
+
+
+class WebhookAlertChannel:
+    """HTTPS webhook transport; endpoint credentials stay in deployment config."""
+
+    def __init__(self, endpoint: str, timeout_seconds: float = 5.0) -> None:
+        if urlparse(endpoint).scheme != "https":
+            raise ValueError("alert webhooks must use HTTPS")
+        self.endpoint = endpoint
+        self.timeout_seconds = timeout_seconds
+
+    def send(self, message: str) -> None:
+        request = Request(
+            self.endpoint,
+            data=json.dumps({"text": message}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=self.timeout_seconds) as response:
+            if response.status >= 300:
+                raise RuntimeError(f"alert webhook returned HTTP {response.status}")
+
+
+class TelegramAlertChannel:
+    """Telegram bot-API alert transport; HTTPS enforced by construction.
+
+    Credentials come from the deployment secret store or environment and are
+    never logged; error messages report status only, never the token.
+    """
+
+    API_BASE = "https://api.telegram.org"
+
+    def __init__(self, bot_token: str, chat_id: str, timeout_seconds: float = 5.0) -> None:
+        if not bot_token or not chat_id:
+            raise ValueError("telegram alert channel requires bot_token and chat_id configuration")
+        self.bot_token = bot_token
+        self.chat_id = chat_id
+        self.timeout_seconds = timeout_seconds
+
+    @classmethod
+    def from_env(cls) -> "TelegramAlertChannel":
+        """Build the channel from environment configuration; missing credentials fail closed."""
+        token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+        if not token or not chat_id:
+            raise ValueError("telegram alert channel requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID configuration")
+        return cls(token, chat_id)
+
+    def endpoint(self) -> str:
+        return f"{self.API_BASE}/bot{self.bot_token}/sendMessage"
+
+    def send(self, message: str) -> None:
+        request = Request(
+            self.endpoint(),
+            data=json.dumps({"chat_id": self.chat_id, "text": message}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=self.timeout_seconds) as response:
+            if response.status >= 300:
+                raise RuntimeError(f"telegram alert returned HTTP {response.status}")
+
+
+class EmailAlertChannel:
+    """SMTP-over-TLS alert transport with password supplied by a callback."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        sender: str,
+        recipient: str,
+        password: Callable[[], str],
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        self.host = host
+        self.port = port
+        self.sender = sender
+        self.recipient = recipient
+        self.password = password
+        self.timeout_seconds = timeout_seconds
+
+    def send(self, message: str) -> None:
+        email = EmailMessage()
+        email["Subject"] = "Trading platform critical alert"
+        email["From"] = self.sender
+        email["To"] = self.recipient
+        email.set_content(message)
+        with smtplib.SMTP_SSL(self.host, self.port, timeout=self.timeout_seconds) as smtp:
+            smtp.login(self.sender, self.password())
+            smtp.send_message(email)
+
+
+class FileAlertChannel:
+    """File-transport alert channel; each file is one independent destination."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def send(self, message: str) -> None:
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{message}\n")
+
+
+DEFAULT_ALERT_FILE = Path(tempfile.gettempdir()) / "trading-platform-alerts-channel-b.log"
 
 
 # ---------------------------------------------------------------------------
@@ -35,12 +156,28 @@ class SystemMonitor:
     - Reconciliation state (errors, warnings)
     - Heartbeat health (dead-man)
     - Journal lag (events processed vs events in ledger)
-    - Database health (connectivity, last write timestamp)
+    - Database health (real connectivity probe, last write timestamp)
+    - Storage health (real disk-usage probe, free-space floor)
     """
 
-    def __init__(self, session_scheduler: Any, heartbeat: Optional[Any] = None):
+    def __init__(
+        self,
+        session_scheduler: Any,
+        heartbeat: Optional[Any] = None,
+        *,
+        db_probe: Optional[Callable[[], object]] = None,
+        disk_probe: Optional[Callable[[Path], Any]] = None,
+        disk_path: Optional[Path] = None,
+        journal_counts_provider: Optional[Callable[[], Tuple[int, int]]] = None,
+        now_fn: Optional[Callable[[], datetime]] = None,
+    ):
         self.session_scheduler = session_scheduler
         self.heartbeat = heartbeat
+        self.db_probe = db_probe
+        self.disk_probe = disk_probe
+        self.disk_path = disk_path
+        self.journal_counts_provider = journal_counts_provider
+        self.now_fn: Callable[[], datetime] = now_fn or (lambda: datetime.now(timezone.utc))
         self.metrics_history: List[Dict[str, Any]] = []
         self.signal_count: int = 0
         self.risk_rejection_count: int = 0
@@ -85,13 +222,11 @@ class SystemMonitor:
         """
         self._last_data_timestamp = timestamp
 
-    def check_data_freshness(
-        self, max_age_seconds: float = 3600.0
-    ) -> Dict[str, Any]:
+    def check_data_freshness(self, max_age_seconds: float = 3600.0) -> Dict[str, Any]:
         """Check if the last bar data is fresh enough.
 
-        V1: If data is older than max_age_seconds, flag it as stale.
-        Returns dict with freshness status and details.
+        Returns dict with freshness status and details. The clock is the
+        injected ``now_fn`` so chaos skew injection can be aimed at it.
         """
         if self._last_data_timestamp is None:
             return {
@@ -101,15 +236,23 @@ class SystemMonitor:
                 "alert": "No data received yet",
             }
 
-        now = datetime.now(timezone.utc)
-        age_seconds = (now - self._last_data_timestamp).total_seconds()
+        now = self.now_fn()
+        last_ts = self._last_data_timestamp
+        # Ensure both datetimes are comparable
+        if last_ts is not None:
+            if last_ts.tzinfo:
+                # last_ts is timezone-aware, make now comparable
+                if now.tzinfo is None:
+                    now = now.replace(tzinfo=last_ts.tzinfo)
+            else:
+                # last_ts is naive, assume UTC
+                if now.tzinfo is not None:
+                    now = now.replace(tzinfo=None)
+        age_seconds = (now - last_ts).total_seconds() if last_ts is not None else float("inf")
         is_fresh = age_seconds <= max_age_seconds
 
         if not is_fresh:
-            logger.warning(
-                f"STALE DATA: age={age_seconds:.1f}s exceeds "
-                f"limit={max_age_seconds}s"
-            )
+            logger.warning(f"STALE DATA: age={age_seconds:.1f}s exceeds limit={max_age_seconds}s")
 
         return {
             "is_fresh": is_fresh,
@@ -134,9 +277,15 @@ class SystemMonitor:
     def journal_lag(self) -> int:
         """Return the number of unprocessed journal events.
 
-        V1: Positive lag means events are backed up; negative lag
-        means the session is processing faster than events arrive.
+        When ``journal_counts_provider`` is configured, counts come from the
+        real source; otherwise the caller-fed counters are used. Positive lag
+        means events are backed up; negative lag means the session is
+        processing faster than events arrive.
         """
+        if self.journal_counts_provider is not None:
+            event_count, processed_count = self.journal_counts_provider()
+            self._journal_event_count = event_count
+            self._processed_event_count = processed_count
         return self._journal_event_count - self._processed_event_count
 
     # --- Database health ---
@@ -149,32 +298,100 @@ class SystemMonitor:
         """
         self._last_write_timestamp = timestamp
 
+    def _probe_connectivity(self) -> Optional[bool]:
+        """Run the real database connectivity probe; None when unconfigured.
+
+        Fail-closed: any exception from the probe is reported as lost
+        connectivity, never as healthy.
+        """
+        if self.db_probe is None:
+            return None
+        try:
+            self.db_probe()
+        except Exception as exc:
+            logger.warning(f"DB PROBE FAILED: {type(exc).__name__}")
+            return False
+        return True
+
     def db_health(self) -> Dict[str, Any]:
         """Check database health status.
 
-        V1: Returns connectivity status and last write recency.
+        When a ``db_probe`` connection factory is configured, connectivity is
+        probed for real and failures fail closed; the caller-fed last-write
+        timestamp still gates write recency. Without a probe, health is based
+        on last-write recency alone.
         """
+        connectivity = self._probe_connectivity()
         if self._last_write_timestamp is None:
             return {
                 "healthy": False,
+                "connectivity": connectivity,
                 "last_write_iso": None,
                 "age_seconds": float("inf"),
                 "alert": "No database write recorded yet",
             }
 
         now = datetime.now(timezone.utc)
-        age_seconds = (now - self._last_write_timestamp).total_seconds()
-        # Consider DB healthy if last write was within 5 minutes
-        healthy = age_seconds < 300.0
+        last_ts = self._last_write_timestamp
+        # Ensure both datetimes are comparable
+        if last_ts is not None:
+            if last_ts.tzinfo:
+                # last_ts is timezone-aware, make now comparable
+                if now.tzinfo is None:
+                    now = now.replace(tzinfo=last_ts.tzinfo)
+            else:
+                # last_ts is naive, assume UTC
+                if now.tzinfo is not None:
+                    now = now.replace(tzinfo=None)
+        age_seconds = (now - last_ts).total_seconds() if last_ts is not None else float("inf")
+        write_recent = age_seconds < 300.0
+        healthy = write_recent and connectivity is not False
 
         if not healthy:
-            logger.warning(f"DB HEALTH: last write {age_seconds:.1f}s ago")
+            logger.warning(f"DB HEALTH: last write {age_seconds:.1f}s ago, connectivity={connectivity}")
 
         return {
             "healthy": healthy,
+            "connectivity": connectivity,
             "last_write_iso": self._last_write_timestamp.isoformat(),
             "age_seconds": age_seconds,
-            "alert": None if healthy else f"DB last write {age_seconds:.1f}s ago",
+            "alert": None if healthy else f"DB last write {age_seconds:.1f}s ago, connectivity={connectivity}",
+        }
+
+    def check_storage(self, min_free_bytes: float = 1_000_000_000.0, path: Optional[Path] = None) -> Dict[str, Any]:
+        """Real storage probe via ``shutil.disk_usage``; fails closed.
+
+        Args:
+            min_free_bytes: Minimum free bytes required for healthy operation
+            path: Filesystem path to probe; defaults to the injected
+                ``disk_path`` or the process working directory
+        """
+        probe_path = path or self.disk_path or Path.cwd()
+        disk_check = self.disk_probe or shutil.disk_usage
+        try:
+            usage = disk_check(probe_path)
+            total_bytes = int(usage.total)
+            free_bytes = int(usage.free)
+        except Exception as exc:
+            logger.warning(f"STORAGE PROBE FAILED: {type(exc).__name__}")
+            return {
+                "healthy": False,
+                "path": str(probe_path),
+                "total_bytes": None,
+                "free_bytes": None,
+                "min_free_bytes": min_free_bytes,
+                "alert": f"storage probe failed: {type(exc).__name__}",
+            }
+        healthy = free_bytes >= min_free_bytes
+        if not healthy:
+            logger.warning(f"STORAGE: free={free_bytes}B below minimum={min_free_bytes}B")
+        return {
+            "healthy": healthy,
+            "path": str(probe_path),
+            "total_bytes": total_bytes,
+            "free_bytes": free_bytes,
+            "min_free_bytes": min_free_bytes,
+            "alert": None if healthy else f"free storage {free_bytes}B below minimum {min_free_bytes}B",
         }
 
     # --- Heartbeat integration ---
@@ -191,9 +408,7 @@ class SystemMonitor:
         return {
             "healthy": healthy,
             "consecutive_misses": self.heartbeat.consecutive_misses,
-            "last_seen": self.heartbeat.last_seen.isoformat()
-            if self.heartbeat.last_seen
-            else None,
+            "last_seen": self.heartbeat.last_seen.isoformat() if self.heartbeat.last_seen else None,
         }
 
     # --- Metrics snapshot ---
@@ -207,6 +422,7 @@ class SystemMonitor:
         hb = self.heartbeat_status()
         data_freshness = self.check_data_freshness()
         db = self.db_health()
+        storage = self.check_storage()
         lag = self.journal_lag()
 
         return {
@@ -214,22 +430,18 @@ class SystemMonitor:
             "signals_recorded": self.signal_count,
             "risk_rejections": self.risk_rejection_count,
             "avg_decision_latency_ms": (
-                sum(self.decision_latencies) / len(self.decision_latencies)
-                if self.decision_latencies else 0.0
+                sum(self.decision_latencies) / len(self.decision_latencies) if self.decision_latencies else 0.0
             ),
-            "trading_halted": self.session_scheduler.is_trading_halted
-            if self.session_scheduler
-            else False,
+            "trading_halted": self.session_scheduler.is_trading_halted if self.session_scheduler else False,
             "startup_reconciliation_done": (
-                self.session_scheduler.startup_reconciliation_done
-                if self.session_scheduler
-                else False
+                self.session_scheduler.startup_reconciliation_done if self.session_scheduler else False
             ),
             "data_freshness": data_freshness,
             "database_health": db,
+            "storage_health": storage,
             "journal_lag": lag,
             "heartbeat_healthy": hb["healthy"],
-            "heartbeat_consecutive_misses": hb["consecutive_misses"],
+            "heartbeat_consecutive_misses": hb.get("consecutive_misses", 0),
             "decision_latencies_sample": self.decision_latencies[-10:] if self.decision_latencies else [],
             "decision_latency_count": len(self.decision_latencies),
         }
@@ -265,7 +477,11 @@ class AlertHandler:
     pager, or log file + external API).
     """
 
-    def __init__(self, channel_a=None, channel_b=None):
+    def __init__(
+        self,
+        channel_a: Callable[[str], None] | None = None,
+        channel_b: Callable[[str], None] | None = None,
+    ) -> None:
         """Initialize alert handler with two channels.
 
         Args:
@@ -279,13 +495,13 @@ class AlertHandler:
     def _default_channel_a(message: str) -> None:
         """Default channel A: stderr log prefix [ALERT-CHAN-A]."""
         import sys
+
         print(f"[ALERT-CHAN-A] {message}", file=sys.stderr)
 
     @staticmethod
     def _default_channel_b(message: str) -> None:
-        """Default channel B: stderr log prefix [ALERT-CHAN-B]."""
-        import sys
-        print(f"[ALERT-CHAN-B] {message}", file=sys.stderr)
+        """Default channel B: dedicated alert file, independent of stderr."""
+        FileAlertChannel(DEFAULT_ALERT_FILE).send(message)
 
     def alert(self, message: str, severity: str = "CRITICAL") -> None:
         """Send alert through both channels.
@@ -357,7 +573,15 @@ class ShadowSessionOperator:
         V1: Full risk decision, hypothetical order generation, NO broker submission.
         Returns dict with decision, hypothetical order, and monitoring metrics.
         """
-        from trading_platform.domain import Instrument, OrderSide, OrderType, TimeInForce
+        from trading_platform.domain import (
+            Instrument,
+            Order,
+            OrderSide,
+            OrderStatus,
+            OrderType,
+            Signal,
+            TimeInForce,
+        )
 
         # Record signal
         self.monitor.record_signal()
@@ -368,6 +592,14 @@ class ShadowSessionOperator:
         quantity = signal_data.get("quantity", 10)
 
         # Create a provisional order intent
+        signal = Signal(
+            instrument=instrument,
+            side=OrderSide.BUY if signal_data.get("side") == "long" else OrderSide.SELL,
+            quantity=quantity,
+            price=bar_price if bar_price and bar_price > 0 else None,
+            order_type=OrderType.MARKET,
+            time_in_force=TimeInForce.DAY,
+        )
         order = Order(
             order_id=f"would_submit_{signal_data.get('timestamp', 'now')}",
             instrument=instrument,
@@ -376,84 +608,32 @@ class ShadowSessionOperator:
             price=bar_price if bar_price and bar_price > 0 else None,
             order_type=OrderType.MARKET,
             time_in_force=TimeInForce.DAY,
+            status=OrderStatus.SUBMITTED,
+            signal=signal,
         )
 
-        # Check risk
+        # Check risk, measuring the actual check duration
         positions = signal_data.get("positions", {})
         current_cash = signal_data.get("cash", 10000.0)
 
+        start = time.perf_counter()
         approved, reason, policy = self.risk_engine.check_order(
-            order, positions, current_cash
+            order,
+            positions,
+            current_cash,
+            starting_cash=current_cash,
+            daily_loss=0.0,
         )
-
-        # Record latency
-        import time
-        start = time.time()
-        # (Risk check already done above)
-        latency_ms = (time.time() - start) * 1000
+        latency_ms = (time.perf_counter() - start) * 1000
         self.monitor.record_decision_latency(latency_ms)
 
-        # Generate hypothetical fill (deterministic, no broker)
-        hypothetical_fill = None
-        if approved:
-            # Create a deterministic fill assumption
-            from trading_platform.simulator.event_driven_simulator import (
-                FillAssumption,
-                CommissionModel,
-            )
-            from trading_platform.simulator.event_driven_simulator import (
-                EventDrivenSimulator,
-            )
-
-            # Use MARKET fill assumption at CLOSE price
-            fake_broker = type(
-                "FakeFillBroker",
-                (object,),
-                {
-                    "execute_order": lambda self, o, b: {
-                        "order_id": o.order_id,
-                        "symbol": o.instrument.symbol,
-                        "side": o.side,
-                        "quantity": o.quantity,
-                        "fill_price": b.close if hasattr(b, "close") else o.price or 0.0,
-                        "commission": 1.0,
-                        "slippage": 0.0,
-                        "status": "FILLED",
-                        "fill_quantity": o.quantity,
-                    }
-                },
-            )()
-
-            bar = type("Bar", (), {"close": bar_price})() if bar_price else type("Bar", (), {"close": 0.0})()
-            execution = fake_broker.execute_order(order, bar)
-
-            hypothetical_fill = {
-                "fill_price": execution["fill_price"],
-                "commission": execution["commission"],
-                "slippage": execution["slippage"],
-                "status": execution["status"],
-                "fill_quantity": execution["fill_quantity"],
-            }
-
-        # Reconcile after hypothetical fill
-        if hypothetical_fill and hypothetical_fill["status"] == "FILLED":
-            # Run reconciliation
-            recon_result = self.reconciliation.reconcile_all(
-                beginning_cash=current_cash,
-                expected_ending_cash=current_cash,
-                expected_positions={},
-                actual_positions={},
-                expected_fills=1,
-                actual_fills=1,
-                oms_orders={},
-                broker_orders={},
-            )
-        else:
-            recon_result = {
-                "overall_status": "PASS",
-                "errors": [],
-                "details": {"cash": "OK", "positions": "OK", "orders": "OK", "fills": "SKIPPED"},
-            }
+        # Shadow mode records an intent only. It must not manufacture a fill or
+        # invoke any broker-shaped object; execution belongs to simulation or
+        # the separately authorized paper boundary. With no fills possible, the
+        # session reconciles its real zero-fill state.
+        fills_ok, fills_detail = self.reconciliation.reconcile_fills(0, 0)
+        recon_status = "PASS" if fills_ok else "FAIL"
+        recon_errors: List[str] = [] if fills_ok else [fills_detail]
 
         # Update monitoring
         self.monitor.record_risk_rejection() if not approved else None
@@ -473,11 +653,11 @@ class ShadowSessionOperator:
             }
             if order
             else None,
-            "hypothetical_fill": hypothetical_fill,
+            "hypothetical_fill": None,
             "risk_policy_version": policy.version if policy else None,
             "reconciliation": {
-                "overall_status": recon_result.get("overall_status", "UNKNOWN"),
-                "errors": recon_result.get("errors", []),
+                "overall_status": recon_status,
+                "errors": recon_errors,
             },
             "monitoring": self.monitor.snapshot(),
         }

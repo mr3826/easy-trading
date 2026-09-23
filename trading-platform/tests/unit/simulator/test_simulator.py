@@ -1,18 +1,24 @@
 """Simulator unit tests for the event-driven trading simulator."""
+
 from datetime import datetime, timezone
 
-from trading_platform.domain import Instrument, Bar
-from trading_platform.domain import OrderSide, Signal, OrderType, TimeInForce
+from trading_platform.domain import (
+    Bar,
+    Instrument,
+    OrderSide,
+    OrderType,
+    Signal,
+    TimeInForce,
+)
 from trading_platform.simulator.event_driven_simulator import (
     EventDrivenSimulator,
-    SimulationMode,
     FillAssumption,
-    SimulationResult,
+    SimulationMode,
 )
 
 
 def test_simulator_basic_buy():
-    """Basic buy order simulation with CLOSE fill assumption."""
+    """Basic buy order simulation uses the next completed bar."""
     inst = Instrument(symbol="AAPL")
 
     # Create bars (3 days of data)
@@ -56,10 +62,10 @@ def test_simulator_basic_buy():
         time_in_force=TimeInForce.DAY,
     )
 
-    # Initialize simulator with CLOSE fill assumption
+    # Completed-bar signals cannot execute on that bar.
     simulator = EventDrivenSimulator(
         mode=SimulationMode.DETERMINISTIC,
-        fill_assumption=FillAssumption.CLOSE,
+        fill_assumption=FillAssumption.NEXT_OPEN,
     )
 
     # Run simulation
@@ -85,7 +91,7 @@ def test_simulator_sell_existing_position():
     """
     inst = Instrument(symbol="AAPL")
 
-    # Bars for buy: 1 bar at $102
+    # Bars for buy: signal fills on the next bar open.
     buy_bars = [
         Bar(
             instrument=inst,
@@ -94,6 +100,15 @@ def test_simulator_sell_existing_position():
             high=105.0,
             low=95.0,
             close=102.0,
+            volume=1000,
+        ),
+        Bar(
+            instrument=inst,
+            timestamp=datetime(2026, 1, 16, tzinfo=timezone.utc),
+            open=102.0,
+            high=105.0,
+            low=101.0,
+            close=104.0,
             volume=1000,
         ),
     ]
@@ -134,7 +149,7 @@ def test_simulator_sell_existing_position():
 
     simulator = EventDrivenSimulator(
         mode=SimulationMode.DETERMINISTIC,
-        fill_assumption=FillAssumption.CLOSE,
+        fill_assumption=FillAssumption.NEXT_OPEN,
     )
 
     # Buy first (1 bar, 1 signal)
@@ -160,7 +175,7 @@ def test_simulator_sell_existing_position():
     # Should have sold the position
     assert sell_result.final_positions[inst.symbol].quantity == 0
     # Cash should increase by sell proceeds: 8979 + 108*10 + 1 = 10060
-    assert sell_result.final_cash == 10060.0
+    assert sell_result.final_cash == 10058.0
     # total_pnl should include realized PnL from the sell
     assert sell_result.final_portfolio.total_pnl != 0
     # Realized PnL from selling at 108 - buying at 102 = 60
@@ -171,7 +186,7 @@ def test_simulator_partial_fill():
     """Test partial fill scenario."""
     inst = Instrument(symbol="AAPL")
 
-    # Only one bar
+    # Two bars are required for next-open execution.
     bars = [
         Bar(
             instrument=inst,
@@ -180,6 +195,15 @@ def test_simulator_partial_fill():
             high=105.0,
             low=95.0,
             close=102.0,
+            volume=1000,
+        ),
+        Bar(
+            instrument=inst,
+            timestamp=datetime(2026, 1, 16, tzinfo=timezone.utc),
+            open=102.0,
+            high=105.0,
+            low=101.0,
+            close=104.0,
             volume=1000,
         ),
     ]
@@ -196,7 +220,7 @@ def test_simulator_partial_fill():
 
     simulator = EventDrivenSimulator(
         mode=SimulationMode.DETERMINISTIC,
-        fill_assumption=FillAssumption.CLOSE,
+        fill_assumption=FillAssumption.NEXT_OPEN,
         start_cash=1100.0,  # Enough for 10 shares @ $102 + commission
     )
 
@@ -222,6 +246,15 @@ def test_simulator_insufficient_cash():
             close=102.0,
             volume=1000,
         ),
+        Bar(
+            instrument=inst,
+            timestamp=datetime(2026, 1, 16, tzinfo=timezone.utc),
+            open=100.0,
+            high=105.0,
+            low=95.0,
+            close=102.0,
+            volume=1000,
+        ),
     ]
 
     # Order for 10 shares at $150 each = $1500, but only $100 cash
@@ -236,7 +269,7 @@ def test_simulator_insufficient_cash():
 
     simulator = EventDrivenSimulator(
         mode=SimulationMode.DETERMINISTIC,
-        fill_assumption=FillAssumption.CLOSE,
+        fill_assumption=FillAssumption.NEXT_OPEN,
         start_cash=100.0,
     )
 
@@ -260,6 +293,15 @@ def test_simulator_deterministic_replay():
             close=102.0,
             volume=1000,
         ),
+        Bar(
+            instrument=inst,
+            timestamp=datetime(2026, 1, 16, tzinfo=timezone.utc),
+            open=102.0,
+            high=105.0,
+            low=101.0,
+            close=104.0,
+            volume=1000,
+        ),
     ]
 
     signal = Signal(
@@ -273,11 +315,11 @@ def test_simulator_deterministic_replay():
 
     simulator = EventDrivenSimulator(
         mode=SimulationMode.DETERMINISTIC,
-        fill_assumption=FillAssumption.CLOSE,
+        fill_assumption=FillAssumption.NEXT_OPEN,
         start_cash=1100.0,
     )
 
-    # Run once
+    # Run once. The second bar is the eligible execution event.
     result1 = simulator.run(bars=bars, signals=[signal])
 
     # Run again with same inputs
@@ -318,7 +360,7 @@ def test_simulation_result_metrics():
 
     simulator = EventDrivenSimulator(
         mode=SimulationMode.DETERMINISTIC,
-        fill_assumption=FillAssumption.CLOSE,
+        fill_assumption=FillAssumption.NEXT_OPEN,
         start_cash=1100.0,
     )
 

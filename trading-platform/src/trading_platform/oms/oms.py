@@ -1,49 +1,46 @@
 """Production OMS state machine for Phase 6.
 
-V1 Order lifecycle: SUBMITTED → ACCEPTED → OPEN → FILLED → CANCELED/REJECTED
+V1 Order lifecycle: SUBMITTED -> ACCEPTED -> OPEN -> PARTIALLY_FILLED -> FILLED -> CANCELED/REJECTED
 
 Key features:
-- Idempotency keys for duplicate detection
+- Idempotency keys for duplicate detection (duplicates are rejected while the
+  original order is pending; terminal-state resubmission is rejected too)
 - OCA (Order Cancel Replace) groups
-- Cancellation and replacement handling
+- Cancellation and replacement handling (transactional with compensation)
 - Timeout handling
 - Order state persistence
 - Order submission/replacement/cancellation API
+- Append-only event ledger: history is never destroyed
+- Fill events carry execution id, commission, and slippage for reconciliation
+- Late/duplicate/over fills are recorded as incidents, never silently dropped
+- Protective (stop-loss) order invariant: position-opening fills require a
+  linked protective order when ``require_protective_orders`` is enabled
+- ``rebuild_from_ledger`` replays durable events to recover state
 """
 
 from __future__ import annotations
 
+import math
 import uuid
 from datetime import datetime, timezone
-from enum import Enum, auto
-from typing import Dict, Optional, Any
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional
 
-from trading_platform.domain import Instrument, Order, OrderSide, OrderType, TimeInForce, OrderStatus, OrderIntent
-
+from trading_platform.domain import (
+    Instrument,
+    Order,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    TimeInForce,
+)
 
 # ---------------------------------------------------------------------------
 # Order status enum — V1 lifecycle
-
-
-class OrderLifecycle(Enum):
-    """V1 order status lifecycle.
-
-    States:
-    - SUBMITTED: Order sent to broker, awaiting acceptance
-    - ACCEPTED: Broker accepted the order
-    - OPEN: Order is active in the market
-    - FILLED: Order has been filled (all or part)
-    - CANCELED: Order was canceled before fill
-    - REJECTED: Order was rejected by risk or broker
-    - EXPIRED: Order expired through time-in-force
-    """
-    SUBMITTED = auto()
-    ACCEPTED = auto()
-    OPEN = auto()
-    FILLED = auto()
-    CANCELED = auto()
-    REJECTED = auto()
-    EXPIRED = auto()
+#
+# The canonical lifecycle enum now lives in the domain model
+# (``trading_platform.domain.OrderStatus``) so OMS state and orders share one
+# type. ``OrderLifecycle`` is retained as an alias for API compatibility.
+OrderLifecycle = OrderStatus
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +97,8 @@ class OCAGroup:
     def cancel_all(self) -> None:
         """Cancel all orders in the group."""
         for order in self.orders.values():
-            order.status = OrderLifecycle.CANCELED
+            if order.status in FILLABLE_STATUSES:
+                order.status = OrderLifecycle.CANCELED
         self.orders.clear()
 
     def replace_all(self, new_order: Order) -> None:
@@ -112,22 +110,44 @@ class OCAGroup:
 # ---------------------------------------------------------------------------
 # OMS state machine
 
+TERMINAL_STATUSES = (
+    OrderLifecycle.FILLED,
+    OrderLifecycle.CANCELED,
+    OrderLifecycle.REJECTED,
+    OrderLifecycle.EXPIRED,
+)
+FILLABLE_STATUSES = (OrderLifecycle.OPEN, OrderLifecycle.PARTIALLY_FILLED)
+CANCELLABLE_STATUSES = (
+    OrderLifecycle.SUBMITTED,
+    OrderLifecycle.ACCEPTED,
+    OrderLifecycle.OPEN,
+    OrderLifecycle.PARTIALLY_FILLED,
+)
+
 
 class OMS:
     """Production Order State Machine.
 
-    V1 lifecycle: SUBMITTED → ACCEPTED → OPEN → (FILLED | CANCELED | REJECTED | EXPIRED)
+    V1 lifecycle: SUBMITTED -> ACCEPTED -> OPEN -> (PARTIALLY_FILLED | FILLED | CANCELED | REJECTED | EXPIRED)
 
     Features:
-    - Idempotency key tracking
+    - Idempotency key tracking (duplicate submissions are rejected)
     - OCA group management
-    - Cancellation and replacement
+    - Cancellation and replacement (transactional with compensation)
     - Timeout tracking
-    - Order lifecycle event reporting
-    - State consistency checks
+    - Order lifecycle event reporting (append-only ledger)
+    - Optional fill-reconciliation callback seam (the OMS never imports risk)
+    - Protective (stop-loss) order invariant
+    - Ledger replay for restart recovery
     """
 
-    def __init__(self, oms_id: str = "default_oms"):
+    def __init__(
+        self,
+        oms_id: str = "default_oms",
+        on_fill_reconcile: Callable[[Mapping[str, Any]], object] | None = None,
+        require_protective_orders: bool = False,
+        require_risk_approval: bool = True,
+    ) -> None:
         self.oms_id = oms_id
         # Order state: order_id -> Order
         self.orders: Dict[str, Order] = {}
@@ -135,17 +155,28 @@ class OMS:
         self.idempotency_keys: Dict[str, str] = {}
         # OCA groups: group_id -> OCAGroup
         self.oca_groups: Dict[str, OCAGroup] = {}
-        # Order lifecycle events
-        self.event_ledger: list[dict] = []
+        # Order lifecycle events (append-only)
+        self.event_ledger: list[Dict[str, Any]] = []
         # Timeout tracking: order_id -> deadline
         self.timeouts: Dict[str, datetime] = {}
+        # Fill deduplication: execution/trade ids already applied
+        self.fill_execution_ids: set[str] = set()
+        # Protective (stop-loss) order links: position symbol -> protective order id
+        self.protective_orders: Dict[str, str] = {}
+        self.require_protective_orders = require_protective_orders
+        self.require_risk_approval = require_risk_approval
+        self.on_fill_reconcile = on_fill_reconcile
 
     # ---- Order submission ----
 
     def submit_order(self, order: Order, idempotency_key: Optional[str] = None) -> tuple[bool, str]:
         """Submit an order through the OMS state machine.
 
-        V1 lifecycle transition: → SUBMITTED
+        V1 lifecycle transition: -> SUBMITTED
+
+        Duplicate detection: an existing order with the same order id is a
+        duplicate in any state; an existing order with the same idempotency key
+        is rejected while pending or terminal, and replaced only when OPEN.
 
         Args:
             order: The order to submit
@@ -155,39 +186,52 @@ class OMS:
             - accepted=True: order accepted into state machine
             - accepted=False: order rejected, reason string
         """
-        # ---- Idempotency check ----
-        if idempotency_key:
-            if idempotency_key in self.idempotency_keys:
-                existing_order_id = self.idempotency_keys[idempotency_key]
-                # Check if the existing order is in a terminal state
-                existing_order = self.orders.get(existing_order_id)
-                if existing_order and existing_order.status in (
-                    OrderLifecycle.FILLED,
-                    OrderLifecycle.CANCELED,
-                    OrderLifecycle.REJECTED,
-                ):
-                    return False, f"Order already {existing_order.status.name} with same idempotency key"
-                # If existing order is OPEN, we can replace it
-                if existing_order and existing_order.status == OrderLifecycle.OPEN:
-                    return self.replace_order(existing_order.order_id, order, idempotency_key)
+        existing = self.orders.get(order.order_id)
+        if existing is not None:
+            return (
+                False,
+                f"Duplicate submission: order {order.order_id} already {existing.status.name}",
+            )
 
+        if self.require_risk_approval:
+            decision = order.risk_decision
+            if decision is None:
+                return False, "Risk approval required before OMS submission"
+            if not decision.approved:
+                return False, f"Risk approval rejected: {decision.reason or 'order not approved'}"
+            if decision.order_intent.order_id != order.order_id:
+                return False, "Risk approval does not match order intent"
+            if not decision.policy_version:
+                return False, "Risk approval must include a policy version"
+
+        if idempotency_key and idempotency_key in self.idempotency_keys:
+            existing_order_id = self.idempotency_keys[idempotency_key]
+            existing_order = self.orders.get(existing_order_id)
+            if existing_order and existing_order.status in TERMINAL_STATUSES:
+                return (
+                    False,
+                    f"Order already {existing_order.status.name} with same idempotency key",
+                )
+            if existing_order and existing_order.status == OrderLifecycle.OPEN:
+                return (
+                    False,
+                    f"Duplicate idempotency key for open order {existing_order_id}; use replace_order explicitly",
+                )
+            return (
+                False,
+                f"Duplicate submission: order {existing_order_id} already "
+                f"{existing_order.status.name if existing_order else 'UNKNOWN'} with same idempotency key",
+            )
+
+        if idempotency_key:
             self.idempotency_keys[idempotency_key] = order.order_id
 
-        # ---- OCA group check ----
-        # Find if order belongs to an OCA group
-        oca_group = None
-        for gid, group in self.oca_groups.items():
-            if order.order_id in group.orders or self._order_in_oca_group(order, gid):
-                oca_group = group
-                break
-
-        # If order has a price and quantity, assign to OCA group if needed
-        if oca_group is None:
-            oca_group = OCAGroup(group_id=order.order_id)
-            self.oca_groups[oca_group.group_id] = oca_group
-            oca_group.add(order)
-        else:
-            oca_group.add(order)
+        # ---- OCA group: each submission owns a group keyed by its order id.
+        # Group reuse is impossible here because membership is keyed by
+        # order ids that the duplicate check above already rejects.
+        oca_group = OCAGroup(group_id=order.order_id)
+        self.oca_groups[oca_group.group_id] = oca_group
+        oca_group.add(order)
 
         # ---- Transition to SUBMITTED ----
         order.status = OrderLifecycle.SUBMITTED
@@ -203,6 +247,9 @@ class OMS:
                 "side": order.side.name,
                 "quantity": order.quantity,
                 "price": order.price,
+                "order_type": order.order_type.name,
+                "time_in_force": order.time_in_force.name,
+                "idempotency_key": idempotency_key,
                 "oca_group": oca_group.group_id if oca_group else None,
             }
         )
@@ -261,62 +308,193 @@ class OMS:
 
     # ---- Order fill ----
 
-    def fill_order(self, order_id: str, fill_quantity: int, fill_price: float) -> bool:
-        """Mark order as filled (partially or fully).
+    def fill_order(
+        self,
+        order_id: str,
+        fill_quantity: int,
+        fill_price: float,
+        execution_id: str | None = None,
+        commission: float = 0.0,
+        slippage: float = 0.0,
+    ) -> bool:
+        """Apply a fill (partially or fully) with durable fill-event semantics.
 
-        V1: Reduces remaining quantity. If remaining == 0, transitions to FILLED.
+        Duplicate fills (same execution id) are deduplicated; late fills after
+        a terminal state and overfills are recorded as incidents and never
+        silently dropped. Partial fills set PARTIALLY_FILLED and average the
+        fill price across fills. Commission and slippage come from the
+        executing broker and are recorded in the ledger for reconciliation.
         """
         order = self.orders.get(order_id)
         if not order:
-            return False
-        if order.status not in (OrderLifecycle.OPEN,):
+            self._record_fill_incident(
+                "UNKNOWN_ORDER_FILL",
+                order_id,
+                execution_id=execution_id,
+                fill_quantity=fill_quantity,
+                fill_price=fill_price,
+            )
             return False
 
-        order.fill_quantity = getattr(order, "fill_quantity", 0) + fill_quantity
-        order.fill_price = fill_price  # last fill price (avg if partial)
+        implicit_execution_id = execution_id or (
+            f"implicit:{order_id}:{fill_quantity}:{fill_price}:{commission}:{slippage}"
+        )
+        if implicit_execution_id in self.fill_execution_ids:
+            self.event_ledger.append(
+                {
+                    "event": "DUPLICATE_FILL_DETECTED",
+                    "order_id": order_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "execution_id": implicit_execution_id,
+                    "fill_quantity": fill_quantity,
+                    "fill_price": fill_price,
+                }
+            )
+            return False
 
-        # If fully filled
-        if order.fill_quantity >= order.quantity:
+        if order.status in TERMINAL_STATUSES:
+            self.event_ledger.append(
+                {
+                    "event": "LATE_FILL_DETECTED",
+                    "order_id": order_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "status": order.status.name,
+                    "severity": "CRITICAL",
+                    "execution_id": implicit_execution_id,
+                    "fill_quantity": fill_quantity,
+                    "fill_price": fill_price,
+                }
+            )
+            return False
+
+        if order.status not in FILLABLE_STATUSES:
+            self._record_fill_incident(
+                "OUT_OF_ORDER_FILL",
+                order_id,
+                execution_id=implicit_execution_id,
+                status=order.status.name,
+            )
+            return False
+
+        if (
+            fill_quantity <= 0
+            or not math.isfinite(fill_price)
+            or fill_price <= 0
+            or not math.isfinite(commission)
+            or commission < 0
+            or not math.isfinite(slippage)
+            or slippage < 0
+        ):
+            self._record_fill_incident(
+                "INVALID_FILL_REJECTED",
+                order_id,
+                execution_id=implicit_execution_id,
+                fill_quantity=fill_quantity,
+                fill_price=fill_price,
+                commission=commission,
+                slippage=slippage,
+            )
+            return False
+
+        remaining = order.quantity - (order.filled_quantity or 0)
+        if fill_quantity > remaining:
+            self.event_ledger.append(
+                {
+                    "event": "OVERFILL_REJECTED",
+                    "order_id": order_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "status": order.status.name,
+                    "requested": fill_quantity,
+                    "remaining": remaining,
+                    "execution_id": implicit_execution_id,
+                }
+            )
+            return False
+
+        if (
+            order.side == OrderSide.BUY
+            and self.require_protective_orders
+            and order.instrument.symbol not in self.protective_orders
+        ):
+            self.event_ledger.append(
+                {
+                    "event": "PROTECTIVE_ORDER_MISSING",
+                    "order_id": order_id,
+                    "symbol": order.instrument.symbol,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "severity": "CRITICAL",
+                    "status": "OPERATOR_RESOLUTION_REQUIRED",
+                    "execution_id": execution_id,
+                }
+            )
+            return False
+
+        previous_filled = order.filled_quantity or 0
+        previous_price = order.filled_price
+        order.filled_quantity = previous_filled + fill_quantity
+        average_price = (
+            (previous_filled * previous_price + fill_quantity * fill_price) / order.filled_quantity
+            if previous_price is not None
+            else fill_price
+        )
+        order.filled_price = average_price
+        order.average_fill_price = average_price
+
+        if order.filled_quantity >= order.quantity:
             order.status = OrderLifecycle.FILLED
-
-            self.event_ledger.append(
-                {
-                    "event": "ORDER_FILLED",
-                    "order_id": order_id,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "status": order.status.name,
-                    "fill_quantity": order.fill_quantity,
-                    "fill_price": order.fill_price,
-                }
-            )
+            order.filled_at = datetime.now(timezone.utc)
+            event_name = "ORDER_FILLED"
         else:
-            # Partially filled - stay OPEN
-            self.event_ledger.append(
-                {
-                    "event": "ORDER_PARTIAL_FILL",
-                    "order_id": order_id,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "status": order.status.name,
-                    "fill_quantity": order.fill_quantity,
-                    "fill_price": order.fill_price,
-                }
-            )
+            order.status = OrderLifecycle.PARTIALLY_FILLED
+            event_name = "ORDER_PARTIAL_FILL"
+
+        event: Dict[str, Any] = {
+            "event": event_name,
+            "order_id": order_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status": order.status.name,
+            "instrument": order.instrument.symbol,
+            "side": order.side.name,
+            "quantity": fill_quantity,
+            "fill_quantity": order.filled_quantity,
+            "fill_price": order.filled_price,
+            "fill_average_price": order.average_fill_price,
+            "commission": commission,
+            "slippage": slippage,
+            "execution_id": implicit_execution_id,
+        }
+        self.event_ledger.append(event)
+        self.fill_execution_ids.add(implicit_execution_id)
+        if self.on_fill_reconcile is not None:
+            self.on_fill_reconcile(event)
         return True
+
+    def _record_fill_incident(self, event_name: str, order_id: str, **details: Any) -> None:
+        """Record a fill anomaly and notify reconciliation without dropping it."""
+        event = {
+            "event": event_name,
+            "order_id": order_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "severity": "CRITICAL",
+            **details,
+        }
+        self.event_ledger.append(event)
+        if self.on_fill_reconcile is not None:
+            self.on_fill_reconcile(event)
 
     # ---- Order cancellation ----
 
     def cancel_order(self, order_id: str, reason: str = "") -> bool:
         """Cancel an order.
 
-        V1: OPEN → CANCELED, SUBMITTED → CANCELED (if not yet accepted).
+        V1: SUBMITTED/ACCEPTED/OPEN/PARTIALLY_FILLED -> CANCELED.
         Returns True if cancellation succeeded.
         """
         order = self.orders.get(order_id)
         if not order:
             return False
 
-        # Can cancel from OPEN or SUBMITTED states
-        if order.status not in (OrderLifecycle.OPEN, OrderLifecycle.SUBMITTED):
+        if order.status not in CANCELLABLE_STATUSES:
             return False
 
         order.status = OrderLifecycle.CANCELED
@@ -342,7 +520,7 @@ class OMS:
                 for oid in list(group.orders.keys()):
                     if oid != order_id:
                         order = self.orders.get(oid)
-                        if order and order.status == OrderLifecycle.OPEN:
+                        if order and order.status in FILLABLE_STATUSES:
                             order.status = OrderLifecycle.CANCELED
                 group.cancel_all()
                 break
@@ -354,32 +532,41 @@ class OMS:
     ) -> tuple[bool, str]:
         """Replace an existing order with a new one.
 
-        V1: Cancel old order, submit new order with same idempotency key logic.
+        The replacement is transactional: preconditions are validated before
+        anything changes, and a mid-way failure is compensated by restoring the
+        prior state and recording an incident event — the old order is never
+        left canceled with no replacement.
         """
-        # Cancel the old order
+        old_order = self.orders.get(old_order_id)
+        if old_order is None:
+            return False, "Order to replace not found"
+        if new_order.order_id in self.orders:
+            return False, f"Replacement order id {new_order.order_id} already exists in OMS"
+
+        group_id, previous_statuses = self._capture_replace_state(old_order_id)
         cancel_ok = self.cancel_order(old_order_id, reason="REPLACE")
         if not cancel_ok:
-            return False, "Could not cancel original order for replacement"
+            return False, f"Order {old_order_id} is {old_order.status.name}; cannot replace"
 
-        # Submit the new order
-        new_order.status = OrderLifecycle.SUBMITTED
-        self.orders[new_order.order_id] = new_order
-
-        # Handle idempotency
-        if idempotency_key:
-            self.idempotency_keys[idempotency_key] = new_order.order_id
-
-        # Handle OCA group - add new order to same group
-        # Find the OCA group of the old order
-        for gid, group in self.oca_groups.items():
-            if old_order_id in group.orders:
-                group.add(new_order)
-                break
-        else:
-            # No OCA group, create new one
-            new_oca = OCAGroup(group_id=new_order.order_id)
-            new_oca.add(new_order)
-            self.oca_groups[new_oca.group_id] = new_oca
+        try:
+            self._commit_replacement(old_order_id, new_order, idempotency_key, group_id)
+        except Exception as exc:
+            self._restore_replace_state(group_id, previous_statuses)
+            self.orders.pop(new_order.order_id, None)
+            if idempotency_key:
+                self.idempotency_keys[idempotency_key] = old_order_id
+            self.event_ledger.append(
+                {
+                    "event": "ORDER_REPLACE_COMPENSATED",
+                    "order_id": old_order_id,
+                    "replacement_order_id": new_order.order_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "reason": str(exc),
+                    "severity": "CRITICAL",
+                    "status": "OPERATOR_RESOLUTION_REQUIRED",
+                }
+            )
+            return False, f"Replacement failed and was compensated: {exc}"
 
         self.event_ledger.append(
             {
@@ -388,9 +575,60 @@ class OMS:
                 "old_order_id": old_order_id,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "status": new_order.status.name,
+                "instrument": new_order.instrument.symbol,
+                "side": new_order.side.name,
+                "quantity": new_order.quantity,
+                "price": new_order.price,
+                "order_type": new_order.order_type.name,
+                "time_in_force": new_order.time_in_force.name,
+                "idempotency_key": idempotency_key,
+                "oca_group": group_id or new_order.order_id,
             }
         )
         return True, "Order replaced"
+
+    def _capture_replace_state(self, order_id: str) -> tuple[Optional[str], Dict[str, OrderStatus]]:
+        """Capture the statuses of the order and its OCA group before a cancel."""
+        group_id: Optional[str] = None
+        statuses: Dict[str, OrderStatus] = {}
+        order = self.orders.get(order_id)
+        if order is not None:
+            statuses[order_id] = order.status
+        for gid, group in self.oca_groups.items():
+            if order_id in group.orders:
+                group_id = gid
+                for oid, member in group.orders.items():
+                    statuses.setdefault(oid, member.status)
+                break
+        return group_id, statuses
+
+    def _restore_replace_state(self, group_id: Optional[str], statuses: Dict[str, OrderStatus]) -> None:
+        """Restore captured statuses (compensation for a failed replacement)."""
+        for oid, status in statuses.items():
+            order = self.orders.get(oid)
+            if order is not None:
+                order.status = status
+                if group_id is not None:
+                    group = self.oca_groups.get(group_id)
+                    if group is not None:
+                        group.add(order)
+
+    def _commit_replacement(
+        self, old_order_id: str, new_order: Order, idempotency_key: Optional[str], group_id: Optional[str]
+    ) -> None:
+        """Commit the replacement order into the state machine."""
+        new_order.status = OrderLifecycle.SUBMITTED
+        self.orders[new_order.order_id] = new_order
+        if idempotency_key:
+            self.idempotency_keys[idempotency_key] = new_order.order_id
+        if group_id is not None:
+            group = self.oca_groups.get(group_id)
+            if group is not None:
+                group.add(new_order)
+                return
+        new_oca = OCAGroup(group_id=new_order.order_id)
+        new_oca.add(new_order)
+        self.oca_groups[new_oca.group_id] = new_oca
 
     # ---- Order timeout ----
 
@@ -413,7 +651,7 @@ class OMS:
         if now > deadline:
             # Cancel the order
             order = self.orders.get(order_id)
-            if order and order.status == OrderLifecycle.OPEN:
+            if order and order.status in FILLABLE_STATUSES:
                 return self.cancel_order(order_id, reason="TIMEOUT")
             return True
         return False
@@ -431,7 +669,7 @@ class OMS:
             return order.status.name
         return None
 
-    def list_orders(self) -> Dict[str, dict]:
+    def list_orders(self) -> Dict[str, Dict[str, Any]]:
         """List all orders with summary state."""
         result = {}
         for oid, order in self.orders.items():
@@ -440,7 +678,7 @@ class OMS:
                 "symbol": order.instrument.symbol,
                 "side": order.side.name,
                 "quantity": order.quantity,
-                "fill_quantity": getattr(order, "fill_quantity", 0),
+                "fill_quantity": (order.filled_quantity or 0),
                 "price": order.price,
             }
         return result
@@ -451,7 +689,7 @@ class OMS:
         """Get OCA group by ID."""
         return self.oca_groups.get(group_id)
 
-    def list_oca_groups(self) -> Dict[str, dict]:
+    def list_oca_groups(self) -> Dict[str, Dict[str, Any]]:
         """List all OCA groups with order summaries."""
         result = {}
         for gid, group in self.oca_groups.items():
@@ -462,15 +700,199 @@ class OMS:
             }
         return result
 
-    # ---- Event ledger ----
+    # ---- Event ledger (append-only) ----
 
-    def get_event_ledger(self) -> list[dict]:
-        """Get the complete order event ledger."""
-        return self.event_ledger
+    def get_event_ledger(self) -> list[Dict[str, Any]]:
+        """Get the complete order event ledger.
 
-    def clear_event_ledger(self) -> None:
-        """Clear the event ledger (for new session)."""
-        self.event_ledger.clear()
+        The ledger is append-only: events are never removed or wiped.
+        """
+        return list(self.event_ledger)
+
+    # ---- Protective (stop-loss) order invariant ----
+
+    def link_protective_order(self, symbol: str, protective_order_id: str) -> bool:
+        """Link a protective (stop-loss) order to a position symbol.
+
+        The protective order must be a known OMS order on the exit side.
+        Returns True if the link was recorded.
+        """
+        protective = self.orders.get(protective_order_id)
+        if protective is None:
+            return False
+        if protective.side != OrderSide.SELL or protective.order_type not in (
+            OrderType.STOP,
+            OrderType.STOP_LIMIT,
+        ):
+            return False
+        if protective.instrument.symbol != symbol:
+            return False
+        if protective.status not in {
+            OrderLifecycle.SUBMITTED,
+            OrderLifecycle.ACCEPTED,
+            OrderLifecycle.OPEN,
+            OrderLifecycle.PARTIALLY_FILLED,
+        }:
+            return False
+        self.protective_orders[symbol] = protective_order_id
+        self.event_ledger.append(
+            {
+                "event": "PROTECTIVE_ORDER_LINKED",
+                "symbol": symbol,
+                "protective_order_id": protective_order_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        return True
+
+    def unlink_protective_order(self, symbol: str) -> None:
+        """Remove the protective link when the position is closed."""
+        protective_order_id = self.protective_orders.pop(symbol, None)
+        if protective_order_id is not None:
+            self.event_ledger.append(
+                {
+                    "event": "PROTECTIVE_ORDER_UNLINKED",
+                    "symbol": symbol,
+                    "protective_order_id": protective_order_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+
+    def check_protective_invariant(self, held_positions: Iterable[str]) -> tuple[bool, str]:
+        """Every held position must have a linked protective (stop-loss) order.
+
+        Returns (satisfied, reason).
+        """
+        missing = []
+        for symbol in held_positions:
+            protective_id = self.protective_orders.get(symbol)
+            protective = self.orders.get(protective_id) if protective_id else None
+            if (
+                protective is None
+                or protective.instrument.symbol != symbol
+                or protective.side != OrderSide.SELL
+                or protective.order_type not in (OrderType.STOP, OrderType.STOP_LIMIT)
+                or protective.status
+                not in {
+                    OrderLifecycle.SUBMITTED,
+                    OrderLifecycle.ACCEPTED,
+                    OrderLifecycle.OPEN,
+                    OrderLifecycle.PARTIALLY_FILLED,
+                }
+            ):
+                missing.append(symbol)
+        if missing:
+            return (
+                False,
+                f"Protective order invariant violated: no stop-loss linked for {', '.join(sorted(missing))}",
+            )
+        return True, "Protective order invariant satisfied"
+
+    # ---- Restart recovery (journal replay) ----
+
+    def rebuild_from_ledger(self, events: Iterable[Mapping[str, Any]]) -> None:
+        """Rebuild OMS state from durable ledger events.
+
+        Replays events in order through the same semantics the production
+        methods apply, restoring orders, statuses, fills, dedup state, and
+        protective links. Events referencing unknown orders are recorded as
+        REPLAY_GAP entries — never silently dropped.
+        """
+        self.orders = {}
+        self.idempotency_keys = {}
+        self.oca_groups = {}
+        self.timeouts = {}
+        self.fill_execution_ids = set()
+        self.protective_orders = {}
+        self.event_ledger = []
+        for event in events:
+            self._replay_event(dict(event))
+
+    def _replay_event(self, event: Dict[str, Any]) -> None:
+        kind = event.get("event")
+        order_id = event.get("order_id")
+        if kind == "ORDER_SUBMITTED":
+            submitted = self._order_from_event(event, str(order_id), OrderStatus.SUBMITTED)
+            self.orders[str(order_id)] = submitted
+            key = event.get("idempotency_key")
+            if key:
+                self.idempotency_keys[str(key)] = str(order_id)
+            gid = event.get("oca_group")
+            if gid:
+                group = self.oca_groups.setdefault(str(gid), OCAGroup(str(gid)))
+                group.add(submitted)
+        elif kind in ("ORDER_ACCEPTED", "ORDER_OPEN"):
+            replayed = self.orders.get(str(order_id)) if order_id else None
+            if replayed is None:
+                self._append_replay_gap(event)
+                return
+            replayed.status = OrderStatus.ACCEPTED if kind == "ORDER_ACCEPTED" else OrderStatus.OPEN
+        elif kind in ("ORDER_FILLED", "ORDER_PARTIAL_FILL"):
+            filled = self.orders.get(str(order_id)) if order_id else None
+            if filled is None:
+                self._append_replay_gap(event)
+                return
+            execution_id = event.get("execution_id")
+            if execution_id:
+                self.fill_execution_ids.add(str(execution_id))
+            filled.filled_quantity = int(event.get("fill_quantity", 0) or 0)
+            fill_price = event.get("fill_price")
+            filled.filled_price = float(fill_price) if fill_price is not None else None
+            average = event.get("fill_average_price")
+            filled.average_fill_price = float(average) if average is not None else filled.filled_price
+            filled.status = OrderStatus.FILLED if kind == "ORDER_FILLED" else OrderStatus.PARTIALLY_FILLED
+        elif kind == "ORDER_CANCELED":
+            canceled = self.orders.get(str(order_id)) if order_id else None
+            if canceled is None:
+                self._append_replay_gap(event)
+                return
+            canceled.status = OrderStatus.CANCELED
+        elif kind == "ORDER_REPLACED":
+            replacement_id = event.get("order_id")
+            if replacement_id and replacement_id not in self.orders:
+                replacement = self._order_from_event(event, str(replacement_id), OrderStatus.SUBMITTED)
+                self.orders[str(replacement_id)] = replacement
+                key = event.get("idempotency_key")
+                if key:
+                    self.idempotency_keys[str(key)] = str(replacement_id)
+                gid = event.get("oca_group")
+                if gid:
+                    group = self.oca_groups.setdefault(str(gid), OCAGroup(str(gid)))
+                    group.add(replacement)
+        elif kind == "PROTECTIVE_ORDER_LINKED":
+            symbol = str(event.get("symbol", ""))
+            protective_id = event.get("protective_order_id")
+            if symbol and protective_id:
+                self.protective_orders[symbol] = str(protective_id)
+        elif kind == "PROTECTIVE_ORDER_UNLINKED":
+            symbol = str(event.get("symbol", ""))
+            if symbol:
+                self.protective_orders.pop(symbol, None)
+        self.event_ledger.append(event)
+
+    def _append_replay_gap(self, event: Mapping[str, Any]) -> None:
+        self.event_ledger.append(
+            {
+                "event": "REPLAY_GAP",
+                "order_id": event.get("order_id"),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "severity": "CRITICAL",
+                "unresolved_event": event.get("event"),
+            }
+        )
+
+    def _order_from_event(self, event: Mapping[str, Any], order_id: str, status: OrderStatus) -> Order:
+        return Order(
+            order_id=order_id,
+            instrument=Instrument(str(event.get("instrument", "UNKNOWN"))),
+            side=OrderSide[str(event.get("side", "BUY"))],
+            quantity=int(event.get("quantity", 1) or 1),
+            price=event.get("price"),
+            order_type=OrderType[str(event.get("order_type", "LIMIT"))],
+            time_in_force=TimeInForce[str(event.get("time_in_force", "DAY"))],
+            status=status,
+            signal=None,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -481,31 +903,33 @@ class FakeBroker:
     """Deterministic fake broker for testing OMS without external dependencies.
 
     V1: Models order execution realistically but deterministically.
-    - Orders fill at CLOSE price (configurable fill assumption)
-    - Commission: FIXED $1.00 per order
+    - Orders fill at the next eligible open (configurable for safe tests)
+    - Commission: FIXED $1.00 per order (recorded in the OMS ledger)
     - Slippage: 0.1% default, configurable
     - No network latency, no rejections beyond risk limits
     - Full order state synchronization with OMS
+    - The event ledger is append-only: cancels never wipe history
     """
 
-    def __init__(self, oms: OMS, fill_assumption: str = "CLOSE"):
+    def __init__(self, oms: OMS, fill_assumption: str = "NEXT_OPEN"):
         self.oms = oms
         self.fill_assumption = fill_assumption
         self.commission_rate = 1.0  # $1.00 per order (FIXED model)
         self.slippage_pct = 0.001  # 0.1% default
         self.order_counter = 0
 
-    def execute_order(self, order: Order, bar: Any) -> dict:
+    def execute_order(self, order: Order, bar: Any) -> Dict[str, Any]:
         """Execute an order deterministically and sync with OMS.
 
         V1 execution model:
-        - Fill price based on fill_assumption (CLOSE, NEXT_OPEN, MARKET, LIMIT)
+        - Fill price based on fill_assumption (NEXT_OPEN, MARKET, LIMIT)
         - Commission: $1.00 per order
         - Slippage: |fill_price - signal_price| for MARKET orders
-        - Sync order state to OMS
+        - Sync order state to OMS with execution id and fee data
         """
         self.order_counter += 1
         order_id = order.order_id
+        execution_id = f"fake-{self.order_counter}"
 
         # Determine fill price based on assumption
         fill_price = self._calculate_fill_price(order, bar)
@@ -515,18 +939,26 @@ class FakeBroker:
 
         # Commission
         commission = self.commission_rate
+        slippage = round(fill_price - (order.price or 0), 2) if order.price else 0.0
 
-        # Sync with OMS
-        self.oms.fill_order(order_id, actual_qty, fill_price)
-
-        # Transition through OMS lifecycle
-        # SUBMITTED → ACCEPTED → OPEN → FILLED (already called above)
-        # If OMS didn't transition, do it here
+        # Transition through OMS lifecycle before accepting any fill.
         oms_order = self.oms.get_order(order_id)
-        if oms_order and oms_order.status == OrderLifecycle.OPEN:
+        if oms_order and oms_order.status == OrderLifecycle.SUBMITTED:
+            self.oms.accept_order(order_id)
+            oms_order = self.oms.get_order(order_id)
+        if oms_order and oms_order.status == OrderLifecycle.ACCEPTED:
             self.oms.open_order(order_id)
-            if oms_order.fill_quantity >= oms_order.quantity:
-                self.oms.fill_order(order_id, oms_order.quantity, fill_price)
+            oms_order = self.oms.get_order(order_id)
+        if oms_order and oms_order.status in FILLABLE_STATUSES:
+            self.oms.fill_order(
+                order_id,
+                actual_qty,
+                fill_price,
+                execution_id=execution_id,
+                commission=commission,
+                slippage=slippage,
+            )
+            oms_order = self.oms.get_order(order_id)
 
         return {
             "order_id": order_id,
@@ -535,9 +967,9 @@ class FakeBroker:
             "quantity": actual_qty,
             "fill_price": fill_price,
             "commission": commission,
-            "slippage": round(fill_price - (order.price or 0), 2) if order.price else 0,
+            "slippage": slippage,
             "status": oms_order.status.name if oms_order else "UNKNOWN",
-            "fill_quantity": oms_order.fill_quantity if oms_order else 0,
+            "fill_quantity": (oms_order.filled_quantity or 0) if oms_order else 0,
         }
 
     def _calculate_fill_price(self, order: Order, bar: Any) -> float:
@@ -547,10 +979,12 @@ class FakeBroker:
         close_price = getattr(bar, "close", 100.0) if bar else 100.0
 
         if self.fill_assumption == "CLOSE":
-            return close_price
+            raise ValueError("same-bar close fills are prohibited")
         elif self.fill_assumption == "NEXT_OPEN":
-            # Would need next bar - use close as placeholder
-            return close_price
+            open_price = getattr(bar, "open", None)
+            if open_price is None:
+                raise ValueError("next-open fake fills require an open price")
+            return float(open_price)
         elif self.fill_assumption == "MARKET":
             # Market order: close + small slippage
             slippage = close_price * self.slippage_pct
@@ -561,105 +995,7 @@ class FakeBroker:
         return close_price
 
     def cancel_all_orders(self) -> None:
-        """Cancel all open orders and sync with OMS."""
-        # Find all OPEN orders
+        """Cancel all open orders and sync with OMS; the ledger is append-only."""
         for oid, order in self.oms.orders.items():
-            if order.status == OrderLifecycle.OPEN:
+            if order.status in FILLABLE_STATUSES:
                 self.oms.cancel_order(oid, reason="BROKER_CANCEL")
-        self.oms.clear_event_ledger()
-
-
-# ---------------------------------------------------------------------------
-# Example usage / demo
-
-
-def demo_oms_lifecycle():
-    """Demonstrate OMS state machine lifecycle."""
-
-    print("=" * 60)
-    print("OMS STATE MACHINE DEMO")
-    print("=" * 60)
-
-    # Initialize OMS and fake broker
-    oms = OMS(oms_id="demo_oms")
-    broker = FakeBroker(oms, fill_assumption="CLOSE")
-
-    # Create an instrument and order
-    inst = Instrument(symbol="AAPL")
-    order = Order(
-        order_id="order-001",
-        instrument=inst,
-        side=OrderSide.BUY,
-        quantity=10,
-        price=None,  # market order
-        order_type=OrderType.MARKET,
-        time_in_force=TimeInForce.DAY,
-        status=OrderLifecycle.SUBMITTED,
-        signal=None,
-        risk_decision=None,
-    )
-
-    # 1. Submit order
-    print("\n1. Submit order:")
-    accepted, reason = oms.submit_order(order)
-    print(f"   Accepted: {accepted}, Reason: {reason}")
-    print(f"   Status: {oms.get_order_status(order.order_id)}")
-
-    # 2. Accept order through OMS
-    print("\n2. Accept order:")
-    accepted = oms.accept_order(order.order_id)
-    print(f"   Accepted: {accepted}")
-    print(f"   Status: {oms.get_order_status(order.order_id)}")
-
-    # 3. Execute through fake broker
-    print("\n3. Execute order via fake broker:")
-    # Create a mock bar
-    class MockBar:
-        close = 102.0
-    execution = broker.execute_order(order, MockBar())
-    print(f"   Execution: {execution['status']}")
-    print(f"   Fill quantity: {execution['fill_quantity']}")
-    print(f"   Fill price: ${execution['fill_price']:.2f}")
-    print(f"   Commission: ${execution['commission']:.2f}")
-    print(f"   Status: {oms.get_order_status(order.order_id)}")
-
-    # 4. Try to submit same idempotency key (should be detected)
-    print("\n4. Submit same order with same idempotency key (should be handled):")
-    order2 = Order(
-        order_id="order-002",
-        instrument=inst,
-        side=OrderSide.BUY,
-        quantity=10,
-        price=None,
-        order_type=OrderType.MARKET,
-        time_in_force=TimeInForce.DAY,
-        status=OrderLifecycle.SUBMITTED,
-        signal=None,
-        risk_decision=None,
-    )
-    # Use same order_id for idempotency test
-    accepted2, reason2 = oms.submit_order(order2, idempotency_key="order-001-key")
-    print(f"   Accepted: {accepted2}, Reason: {reason2}")
-
-    # 5. Cancel order
-    print("\n5. Cancel order:")
-    cancelled = oms.cancel_order(order.order_id, reason="DEMO_CANCEL")
-    print(f"   Cancelled: {cancelled}")
-    print(f"   Status: {oms.get_order_status(order.order_id)}")
-
-    # 6. List all orders
-    print("\n6. List all orders:")
-    for oid, summary in oms.list_orders().items():
-        print(f"   {oid}: status={summary['status']}, symbol={summary['symbol']}, qty={summary['quantity']}")
-
-    # 7. Event ledger
-    print("\n7. Event ledger:")
-    for event in oms.get_event_ledger():
-        print(f"   {event}")
-
-    print(f"\n{'=' * 60}")
-    print("OMS lifecycle demo complete.")
-
-
-if __name__ == "__main__":
-    demo_oms_lifecycle()

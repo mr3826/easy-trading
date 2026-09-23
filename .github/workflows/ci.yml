@@ -1,0 +1,69 @@
+name: Verification
+
+on:
+  pull_request:
+  push:
+    branches: [main, fix/verified-platform-foundation]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: trading_platform_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U postgres -d trading_platform_test"
+          --health-interval=5s --health-timeout=5s --health-retries=10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/trading_platform_test
+      LIVE_TRADING_ENABLED: "false"
+      LIVE_STATUS: NOT_AUTHORIZED
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.10.9"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install locked dependencies
+        run: uv sync --all-extras --locked
+      - name: Import production modules
+        run: uv run python scripts/import_smoke.py
+      - name: Ruff
+        run: uv run ruff check .
+      - name: Format
+        run: uv run ruff format --check .
+      - name: Mypy
+        run: uv run mypy trading-platform/src
+      - name: Prepare artifacts
+        run: mkdir -p artifacts/verification
+      - name: Tests and coverage
+        run: >-
+          uv run pytest -m "not external" --cov=trading_platform
+          --cov-report=term-missing --cov-report=xml:artifacts/verification/coverage.xml
+          --cov-fail-under=80
+          --junitxml=artifacts/verification/test-results.xml
+      - name: Critical coverage
+        run: >-
+          uv run coverage report
+          --include='*/trading_platform/oms/*.py,*/trading_platform/risk/*.py,*/trading_platform/reconciliation/*.py,*/trading_platform/authorization.py'
+          --fail-under=90
+      - name: Dependency audit
+        run: uv run pip-audit
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload verification artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification
+          path: artifacts/verification/

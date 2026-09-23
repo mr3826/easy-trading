@@ -4,7 +4,14 @@ sys.path.insert(0, r"D:\hexabyte_technologies\easy-trading\trading-platform\src"
 
 from trading_platform.risk.risk_engine import HardRiskEngine, RiskPolicyVersion, ReconciliationEngine, SessionScheduler
 from trading_platform.oms.oms import OMS
-from trading_platform.chaos_engine import FailureInjector, FailureScenarios, RunbookGenerator, DeadManHeartbeat, FailureRecord
+from trading_platform.chaos_engine import (
+    FailureInjector,
+    FailureScenarios,
+    RunbookGenerator,
+    DeadManHeartbeat,
+    FailureRecord,
+    FAILURE_INTERNET_LOSS,
+)
 from trading_platform.domain import Instrument
 
 print("=" * 60)
@@ -38,7 +45,7 @@ print(f"  Imported state: errors={reconcile2.errors}")
 
 # --- FailureInjector ---
 print("\n--- FailureInjector ---")
-inj = FailureInjector(FailureScenarios.FAILURE_INTERNET_LOSS, duration=5.0)
+inj = FailureInjector(FAILURE_INTERNET_LOSS, duration=5.0)
 print(f"  Injector active: {inj.status()['active']}")
 inj.recover()
 print(f"  After recover: {inj.status()}")

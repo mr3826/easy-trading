@@ -1,0 +1,12 @@
+commit=7f7cab653d1c791aba426a68327e3bbdb577d741
+command=uv run pip-audit
+utc=2026-09-22T23:13:00.781222+00:00
+platform=nt
+python=Python 3.14.3
+uv=uv 0.10.9 (f675560f3 2026-03-06)
+exit_code=0
+
+Name             Skip Reason
+---------------- -------------------------------------------------------------------------------
+trading-platform Dependency not found on PyPI and could not be audited: trading-platform (1.0.0)
+No known vulnerabilities found
