@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -28,18 +30,23 @@ from trading_platform.data import (
 )
 from trading_platform.data.ingestion.daily_bar_ingestion import (
     DailyBarIngestion,
+    apply_dividend_adjustment,
     apply_split_adjustment,
     load_parquet_data,
+    read_raw_archive,
 )
 from trading_platform.dead_man import heartbeat_is_fresh
 from trading_platform.domain import (
     Bar,
+    BrokerSnapshot,
     Instrument,
     Order,
+    OrderIntent,
     OrderSide,
     OrderStatus,
     OrderType,
     Position,
+    RiskDecision,
     Signal,
     TimeInForce,
 )
@@ -100,8 +107,10 @@ def make_bar(symbol: str = "AAPL", day: int = 1, opening: float = 100.0) -> Bar:
 def make_order(price: float | None = 100.0, symbol: str = "AAPL", quantity: int = 1) -> Order:
     instrument = Instrument(symbol)
     signal = Signal(instrument, OrderSide.BUY, quantity, price, OrderType.LIMIT, TimeInForce.DAY)
+    order_id = f"order-{symbol}-{quantity}-{price}"
+    intent = OrderIntent(signal=signal, order_id=order_id)
     return Order(
-        f"order-{symbol}-{quantity}-{price}",
+        order_id,
         instrument,
         OrderSide.BUY,
         quantity,
@@ -110,6 +119,7 @@ def make_order(price: float | None = 100.0, symbol: str = "AAPL", quantity: int 
         TimeInForce.DAY,
         OrderStatus.SUBMITTED,
         signal,
+        risk_decision=RiskDecision(intent, True, reason="test approval", policy_version="test-v1"),
     )
 
 
@@ -143,16 +153,81 @@ def test_data_validation_and_ingestion(tmp_path: Path) -> None:
     result = ingestion.ingest_symbol("AAPL", first.timestamp, second.timestamp)
     assert result.success and len(result.bars) == 2
     assert not ingestion.ingest_symbol("MSFT", first.timestamp, second.timestamp).success
-    assert not ParquetMarketDataProvider(tmp_path).has_bars(Instrument("AAPL"), first.timestamp, second.timestamp)
+
+    parquet = ParquetMarketDataProvider(tmp_path)
+    assert not parquet.has_bars(Instrument("AAPL"), first.timestamp, second.timestamp)
+    with pytest.raises(ValueError):
+        parquet.write_bars([], source="unit-test", schema_version="v1", dataset_version="v1")
+    parquet.write_bars(
+        [first, second], source="unit-test", schema_version="v1", dataset_version="v1", available_at=second.timestamp
+    )
+    assert parquet.has_bars(Instrument("AAPL"), first.timestamp, second.timestamp)
+    assert len(parquet.get_bars(Instrument("AAPL"), first.timestamp, second.timestamp)) == 2
+    assert parquet.get_bars(Instrument("AAPL"), first.timestamp, second.timestamp, as_of=first.timestamp) == []
+    assert len(parquet.get_bars(Instrument("AAPL"), first.timestamp, second.timestamp, as_of=second.timestamp)) == 2
+    metadata = parquet.get_metadata(Instrument("AAPL"))
+    assert (
+        metadata.checksum
+        == hashlib.sha256(max(parquet._parquet_files("AAPL"), key=lambda path: path.name).read_bytes()).hexdigest()
+    )
+    assert parquet.get_metadata(Instrument("AAPL")) == metadata
+    with pytest.raises(ValueError):
+        parquet.write_bars([first], source="unit-test", schema_version="v1", dataset_version="v1")
+    revised = Bar(
+        Instrument("AAPL"), first.timestamp, first.open, first.high, first.low, first.close + 0.5, first.volume
+    )
+    parquet.write_bars(
+        [revised], source="unit-test", schema_version="v1", dataset_version="v2", available_at=second.timestamp
+    )
+    bars = parquet.get_bars(Instrument("AAPL"), first.timestamp, second.timestamp, as_of=second.timestamp)
+    assert [bar.close for bar in bars] == [revised.close, second.close]
+    superseded = parquet.get_superseded(Instrument("AAPL"), first.timestamp, second.timestamp, as_of=second.timestamp)
+    assert [bar.close for bar in superseded] == [first.close]
+
+    archival = DailyBarIngestion(parquet, raw_archive_dir=tmp_path / "raw")
+    archival.set_engineering_universe({Instrument("AAPL")})
+    archived_result = archival.ingest_symbol("AAPL", first.timestamp, second.timestamp, as_of=second.timestamp)
+    assert archived_result.success and archived_result.raw_archive_path is not None
+    assert archived_result.raw_archive_path.is_relative_to(tmp_path / "raw")
+    raw_records = read_raw_archive(tmp_path / "raw", "AAPL")
+    assert len(raw_records) == 2
+    assert {record["checksum"] for record in raw_records} == {
+        hashlib.sha256(
+            json.dumps(
+                {
+                    "symbol": "AAPL",
+                    "timestamp": bar.timestamp.isoformat(),
+                    "open": bar.open,
+                    "high": bar.high,
+                    "low": bar.low,
+                    "close": bar.close,
+                    "volume": bar.volume,
+                },
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        for bar in archived_result.bars
+    }
+    assert all(
+        record["retrieval_timestamp"] == parquet.get_metadata(Instrument("AAPL")).retrieval_timestamp.isoformat()
+        for record in raw_records
+    )
+    assert all(record["source"] == "unit-test" for record in raw_records)
 
     frame = pd.DataFrame([{"timestamp": "2026-01-01", "open": 10, "high": 12, "low": 9, "close": 11, "volume": 100}])
     frame.to_parquet(tmp_path / "AAPL.parquet")
     loaded = load_parquet_data(tmp_path, "AAPL")
     assert str(loaded["timestamp"].dt.tz) == "UTC"
-    split = DataCorporateAction(Instrument("AAPL"), CorporateActionType.SPLIT, first.timestamp, ratio=2.0)
-    adjusted = apply_split_adjustment([first], [split], second.timestamp)
+    split = DataCorporateAction(Instrument("AAPL"), CorporateActionType.SPLIT, second.timestamp, ratio=2.0)
+    adjusted = apply_split_adjustment([first, second], [split], second.timestamp)
     assert adjusted[0].close == first.close / 2
+    assert adjusted[1].close == second.close
     assert apply_split_adjustment([first], [], second.timestamp) == [first]
+    dividend = DataCorporateAction(Instrument("AAPL"), CorporateActionType.DIVIDEND, second.timestamp, cash_amount=1.0)
+    dividend_adjusted = apply_dividend_adjustment([first, second], [dividend], second.timestamp)
+    assert dividend_adjusted[0].close == pytest.approx(first.close - 1.0)
+    assert dividend_adjusted[1].close == second.close
+    assert apply_dividend_adjustment([first, second], [], second.timestamp) == [first, second]
 
 
 def test_risk_limits_and_hard_controls() -> None:
@@ -160,8 +235,8 @@ def test_risk_limits_and_hard_controls() -> None:
         "AAPL": Position(Instrument("AAPL"), 10, 100, 1000, 0, 0),
         "MSFT": Position(Instrument("MSFT"), 10, 100, 1000, 0, 0),
     }
-    assert check_buying_power(1, 100, 500, {})[0]
-    assert not check_buying_power(10, 100, 500, {})[0]
+    assert check_buying_power(1, 100, 500, {}, 1.0)[0]
+    assert not check_buying_power(10, 100, 500, {}, 1.0)[0]
     assert not check_gross_exposure(pos, 100)[0]
     assert not check_sector_concentration(Instrument("AAPL"), pos, {"AAPL": "tech", "MSFT": "tech"})[0]
     limits = PortfolioRiskLimits(
@@ -176,16 +251,16 @@ def test_risk_limits_and_hard_controls() -> None:
     assert not limits.check_cash_reserve(10, 1000)[0]
 
     engine = HardRiskEngine([RiskPolicyVersion(1, max_positions=1, max_gross_exposure=5000, min_cash_reserve_pct=0)])
-    approved, _, policy = engine.check_order(make_order(), {}, 1000)
+    approved, _, policy = engine.check_order(make_order(), {}, 1000, starting_cash=1000)
     assert approved and policy is not None
     engine.disable_symbol("AAPL")
-    assert not engine.check_order(make_order(100.0, "AAPL"), {}, 1000)[0]
+    assert not engine.check_order(make_order(100.0, "AAPL"), {}, 1000, starting_cash=1000)[0]
     engine.disabled_symbols.clear()
     engine.block_new_positions()
-    assert not engine.check_order(make_order(), {}, 1000)[0]
+    assert not engine.check_order(make_order(), {}, 1000, starting_cash=1000)[0]
     engine.new_positions_blocked = False
     engine.disable_all_submissions()
-    assert not engine.check_order(make_order(), {}, 1000)[0]
+    assert not engine.check_order(make_order(), {}, 1000, starting_cash=1000)[0]
     assert not HardRiskEngine().check_order(make_order(), {}, 1000)[0]
 
 
@@ -261,7 +336,9 @@ def test_oms_lifecycle_fake_broker_and_oca() -> None:
     oms = OMS("depth")
     order = make_order()
     assert oms.submit_order(order, "idem-1")[0]
-    assert oms.submit_order(order, "idem-1")[0]
+    duplicate = oms.submit_order(order, "idem-1")
+    assert not duplicate[0]
+    assert "Duplicate submission" in duplicate[1]
     assert len(oms.orders) == 1
     assert oms.accept_order(order.order_id)
     assert oms.open_order(order.order_id)
@@ -308,7 +385,7 @@ def test_oms_negative_paths_replacement_timeout_and_price_modes() -> None:
     assert oms.accept_order(order.order_id)
     assert oms.open_order(order.order_id)
     assert oms.fill_order(order.order_id, 1, 100)
-    assert oms.get_order_status(order.order_id) == "OPEN"
+    assert oms.get_order_status(order.order_id) == "PARTIALLY_FILLED"
     oms.set_timeout(order.order_id, datetime.now(UTC) - timedelta(seconds=1))
     assert oms.check_timeout(order.order_id, datetime.now(UTC))
     assert oms.get_order_status(order.order_id) == "CANCELLED"
@@ -319,13 +396,18 @@ def test_oms_negative_paths_replacement_timeout_and_price_modes() -> None:
     assert replacement_oms.submit_order(old, "replace-key")[0]
     assert replacement_oms.accept_order(old.order_id)
     assert replacement_oms.open_order(old.order_id)
-    assert replacement_oms.submit_order(replacement, "replace-key")[0]
+    assert replacement_oms.replace_order(old.order_id, replacement, "replace-key")[0]
     assert replacement_oms.get_order_status(old.order_id) == "CANCELLED"
     assert replacement_oms.get_order_status(replacement.order_id) == "SUBMITTED"
     assert replacement_oms.list_oca_groups()
-    assert replacement_oms.get_event_ledger()
-    replacement_oms.clear_event_ledger()
-    assert not replacement_oms.get_event_ledger()
+    ledger_events = replacement_oms.get_event_ledger()
+    assert [event["event"] for event in ledger_events] == [
+        "ORDER_SUBMITTED",
+        "ORDER_ACCEPTED",
+        "ORDER_OPEN",
+        "ORDER_CANCELED",
+        "ORDER_REPLACED",
+    ]
 
     fake = FakeBroker(replacement_oms, "MARKET")
     assert fake._calculate_fill_price(replacement, make_bar("ORCL", opening=100)).__class__ is float
@@ -361,13 +443,28 @@ def test_reconciliation_scheduler_and_monitor() -> None:
     oms = OMS("reconcile")
     recon = ReconciliationEngine(oms)
     assert recon.reconcile_all(1000, 1000, {}, {}, 0, 0, {"one": {"status": "OPEN"}}, {})["overall_status"] == "FAIL"
+    assert recon.blocks_new_orders
+    assert recon.resolve("operator", "acknowledged")
+    assert not recon.blocks_new_orders
     recon.clear_errors()
     assert recon.reconcile_all(1000, 1000, {}, {}, 0, 0, {}, {})["overall_status"] == "PASS"
     assert recon.validate_paper_session("session", 1000, 999, {"AAPL": 1}, {}, [], {})["overall_status"] == "FAIL"
     comparison = recon.compare_session_to_simulation({"metrics": {}}, {"metrics": {}})
     assert comparison["overall_match"]
     scheduler = SessionScheduler(HardRiskEngine(), recon)
-    assert scheduler.startup()["status"] == "STARTUP_OK"
+    assert (
+        scheduler.startup(
+            beginning_cash=1000.0,
+            expected_ending_cash=1000.0,
+            expected_positions={},
+            actual_positions={},
+            expected_fills=0,
+            actual_fills=0,
+            broker_orders={},
+            broker_snapshot=BrokerSnapshot(datetime.now(UTC), {}, 1000.0, 1000.0),
+        )["status"]
+        == "STARTUP_OK"
+    )
     assert scheduler.should_trade()
     assert scheduler.check_market_calendar(False, True)["status"] == "TRADING_HALTED"
     assert not scheduler.should_trade()
@@ -489,6 +586,7 @@ def test_ml_candidate_and_strict_llm_boundary() -> None:
         "c",
         {},
         now,
+        feature_available_at={"close": now - timedelta(days=1)},
     )
     registry = MLCandidateRegistry()
     registry.register(candidate)
@@ -523,6 +621,10 @@ def test_deterministic_ml_pipeline_is_point_in_time_and_registered() -> None:
             datetime(2026, 1, day, tzinfo=UTC),
             {"momentum": float(day), "volatility": 1.0},
             float(day) / 10,
+            {
+                "momentum": datetime(2026, 1, day, tzinfo=UTC),
+                "volatility": datetime(2026, 1, day, tzinfo=UTC),
+            },
         )
         for day in range(1, 11)
     ]
@@ -533,6 +635,7 @@ def test_deterministic_ml_pipeline_is_point_in_time_and_registered() -> None:
     assert artifact.validation_count == 2
     assert artifact.test_count == 2
     assert artifact.dataset_hash and artifact.model_hash
+    assert artifact.feature_schema_hash
     assert artifact.predict(examples[-1]) > artifact.fallback()
     assert artifact.fallback() == pytest.approx(sum(example.label for example in examples[:6]) / 6)
     registry = MLModelRegistry()
@@ -541,7 +644,15 @@ def test_deterministic_ml_pipeline_is_point_in_time_and_registered() -> None:
     with pytest.raises(ValueError):
         registry.register(artifact)
     with pytest.raises(ModelInputRejected):
-        artifact.predict(TrainingExample(examples[-1].timestamp, examples[-1].available_at, {"other": 1.0}, 0.1))
+        artifact.predict(
+            TrainingExample(
+                examples[-1].timestamp,
+                examples[-1].available_at,
+                {"other": 1.0},
+                0.1,
+                {"other": examples[-1].available_at},
+            )
+        )
     with pytest.raises(ModelInputRejected):
         MLTrainingPipeline().train("bad", list(reversed(examples)), "code", criteria)
     with pytest.raises(ModelInputRejected):
@@ -554,6 +665,10 @@ def test_deterministic_ml_pipeline_is_point_in_time_and_registered() -> None:
                     examples[4].available_at,
                     {"momentum": 6.0, "volatility": 1.0},
                     0.6,
+                    {
+                        "momentum": examples[4].available_at,
+                        "volatility": examples[4].available_at,
+                    },
                 )
             ]
             + examples[6:],
@@ -561,7 +676,13 @@ def test_deterministic_ml_pipeline_is_point_in_time_and_registered() -> None:
             criteria,
         )
     with pytest.raises(ModelInputRejected):
-        TrainingExample(examples[0].timestamp, examples[0].timestamp + timedelta(seconds=1), {"x": 1.0}, 0.1)
+        TrainingExample(
+            examples[0].timestamp,
+            examples[0].timestamp + timedelta(seconds=1),
+            {"x": 1.0},
+            0.1,
+            {"x": examples[0].timestamp + timedelta(seconds=1)},
+        )
 
 
 def test_strategy_metrics_and_walk_forward_split() -> None:
@@ -582,7 +703,7 @@ def test_strategy_metrics_and_walk_forward_split() -> None:
     assert split.get_test_period([date(2026, 1, 1), date(2026, 3, 31)]) == result["test"]
 
 
-def test_baseline_report_and_walk_forward_execution() -> None:
+def test_baseline_report_and_walk_forward_execution(tmp_path: Path) -> None:
     instrument = Instrument("AAPL")
     bars = [make_bar(day=1), make_bar(day=2, opening=102)]
     signal = Signal(instrument, OrderSide.BUY, 1, None, OrderType.MARKET, TimeInForce.DAY)
@@ -592,18 +713,38 @@ def test_baseline_report_and_walk_forward_execution() -> None:
     generated = report.generate()
     assert generated["report_type"] == "engineering_baseline_v1"
     assert generated["summary"]["trade_count"] == 1
+    assert isinstance(generated["risk"]["max_drawdown"], float)
+    assert isinstance(generated["risk"]["turnover"], float)
+    assert generated["determinism"]["seed"] == simulator.seed
     assert "disclaimer" in report.to_json()
     assert compute_turnover(3, 2) == 5.0
+    assert compute_turnover(3, 2, equity=100.0) == 0.05
     assert compute_mae_mfe([]) == {"mae": 0.0, "mfe": 0.0}
     assert compute_mae_mfe([{"entry_price": "bad", "exit_price": 2}]) == {"mae": 0.0, "mfe": 0.0}
 
     period_split = PeriodSplit(30, 10, 15)
-    evaluator = WalkForwardEvaluator(simulator, MaCrossHypothesis(), period_split, ExperimentRegistry())
+    evaluator = WalkForwardEvaluator(
+        simulator, MaCrossHypothesis(), period_split, ExperimentRegistry(root=tmp_path / "experiments")
+    )
     fold = period_split.split(date(2026, 1, 1), date(2026, 3, 31))
     fold_result = evaluator.run_fold(0, fold, {"AAPL": {}}, ["AAPL"])
     assert fold_result["test_trade_count"] == 0
     assert evaluator.aggregate_results()["folds"] == 1
-    assert evaluator.bootstrap_drawdown_distribution(n_resamples=5)["n_resamples"] == 5
+    evaluator.fold_results.append(
+        {
+            "test_total_pnl": 10.0,
+            "test_total_commission": 1.0,
+            "test_total_slippage": 0.0,
+            "test_trade_pnls": [5.0, -2.0, 8.0, -1.0],
+            "test_max_drawdown": 0.01,
+            "test_turnover": 0.001,
+            "test_gross_exposure_pct": 10.0,
+            "long_only_preserved": True,
+        }
+    )
+    bootstrap = evaluator.bootstrap_drawdown_distribution(n_resamples=5)
+    assert bootstrap["n_resamples"] == 5
+    assert bootstrap == evaluator.bootstrap_drawdown_distribution(n_resamples=5)
 
 
 def test_shadow_operator_never_creates_a_fill() -> None:

@@ -107,6 +107,7 @@ def check_sector_concentration(
 def check_gross_exposure(
     current_positions: Dict[str, Position],
     gross_limit: float = 1_000_000.0,  # V1 PROVISIONAL: $1M notional gross
+    proposed_notional: float = 0.0,
 ) -> Tuple[bool, str]:
     """Check gross exposure limit.
 
@@ -114,7 +115,7 @@ def check_gross_exposure(
 
     Returns (approved, reason).
     """
-    total_gross = sum(abs(pos.market_value) for pos in current_positions.values())
+    total_gross = sum(abs(pos.market_value) for pos in current_positions.values()) + max(proposed_notional, 0.0)
 
     if total_gross > gross_limit:
         return (
@@ -133,12 +134,13 @@ def check_buying_power(
     order_price: float,
     current_cash: float,
     current_positions: Dict[str, Position],
-    commission: float = 1.0,
+    commission: float,
 ) -> Tuple[bool, str]:
     """Check if a buy order is affordable in a cash account.
 
     V1: no leverage, cash = settled cash only.
-    Estimated cost = abs(qty) * price + commission.
+    Estimated cost = abs(qty) * price + commission; commission must be
+    supplied from policy/config so no fee assumption is hard-coded here.
 
     Returns (approved, reason).
     """

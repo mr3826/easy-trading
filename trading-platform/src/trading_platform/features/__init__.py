@@ -46,9 +46,19 @@ def parse_news_feature(raw: str, allowed_symbols: set[str]) -> NewsFeature:
         raise FeatureRejected("unknown symbol")
     sentiment = value["sentiment"]
     confidence = value["confidence"]
-    if not isinstance(sentiment, (int, float)) or not math.isfinite(sentiment) or not -1 <= sentiment <= 1:
+    if (
+        isinstance(sentiment, bool)
+        or not isinstance(sentiment, (int, float))
+        or not math.isfinite(sentiment)
+        or not -1 <= sentiment <= 1
+    ):
         raise FeatureRejected("invalid sentiment")
-    if not isinstance(confidence, (int, float)) or not math.isfinite(confidence) or not 0 <= confidence <= 1:
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not math.isfinite(confidence)
+        or not 0 <= confidence <= 1
+    ):
         raise FeatureRejected("invalid confidence")
     observed_at = value["observed_at"]
     if not isinstance(observed_at, str) or not observed_at.strip() or _INJECTION.search(observed_at):

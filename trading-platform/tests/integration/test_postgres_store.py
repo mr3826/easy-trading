@@ -14,7 +14,7 @@ from pathlib import Path
 
 import asyncpg
 import pytest
-from trading_platform.persistence.postgres import PostgresStore
+from trading_platform.persistence.postgres import PersistenceUnavailable, PostgresStore
 
 pytestmark = pytest.mark.postgres
 
@@ -101,5 +101,72 @@ def test_postgres_migration_idempotency_and_recovery() -> None:
             await store.close()
         fail_closed = await store.fail_closed_recovery()
         assert fail_closed.blocked
+
+    asyncio.run(scenario())
+
+
+def test_shadow_decision_roundtrip_idempotency_and_validation() -> None:
+    dsn = os.getenv("DATABASE_URL")
+    if not dsn:
+        pytest.skip("DATABASE_URL is required for real PostgreSQL integration")
+
+    async def scenario() -> None:
+        store = PostgresStore(
+            dsn,
+            Path(__file__).parents[2] / "migrations",
+        )
+        await store.connect()
+        try:
+            await store.migrate()
+            decision_id = f"shadow-{uuid.uuid4().hex}"
+            decision = {
+                "decision_id": decision_id,
+                "symbol": "AAPL",
+                "action": "WOULD_SUBMIT",
+                "quantity": 5,
+                "bar_timestamp": datetime.now(timezone.utc),
+                "confidence": 0.8,
+            }
+            await store.record_shadow_decision(decision)
+            await store.record_shadow_decision(decision)
+            rows = await store.list_shadow_decisions()
+            row = next(row for row in rows if row["decision_id"] == decision_id)
+            assert row["symbol"] == "AAPL"
+            assert row["action"] == "WOULD_SUBMIT"
+            assert row["quantity"] == 5
+            assert row["decision"]["confidence"] == 0.8
+            assert row["recorded_at"] is not None
+
+            with pytest.raises(PersistenceUnavailable):
+                await store.record_shadow_decision(
+                    {
+                        "symbol": "AAPL",
+                        "action": "WOULD_SUBMIT",
+                        "quantity": 1,
+                        "bar_timestamp": datetime.now(timezone.utc),
+                    }
+                )
+            with pytest.raises(PersistenceUnavailable):
+                await store.record_shadow_decision(
+                    {
+                        "decision_id": f"shadow-{uuid.uuid4().hex}",
+                        "symbol": "AAPL",
+                        "action": "WOULD_SUBMIT",
+                        "quantity": 0,
+                        "bar_timestamp": datetime.now(timezone.utc),
+                    }
+                )
+            with pytest.raises(PersistenceUnavailable):
+                await store.record_shadow_decision(
+                    {
+                        "decision_id": f"shadow-{uuid.uuid4().hex}",
+                        "symbol": "AAPL",
+                        "action": "WOULD_SUBMIT",
+                        "quantity": 1,
+                        "bar_timestamp": datetime.now(),
+                    }
+                )
+        finally:
+            await store.close()
 
     asyncio.run(scenario())

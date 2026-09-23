@@ -2,7 +2,7 @@
 
 V1 Daily Long-Only Hypothesis:
 - One signal per day based on SMA crossover
-- Long-only: never short
+- Long-only: never short; SELL signals only exit an existing long
 - Maximum 3 positions (per ADR V1)
 - Holding period: days to weeks
 - Cash: no leverage, cash account
@@ -11,7 +11,7 @@ V1 Daily Long-Only Hypothesis:
 - Slippage: 0.1% modeled via fill assumption
 """
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -71,50 +71,75 @@ def generate_signal(
     hypothesis: MaCrossHypothesis,
     symbol: str,
     current_date: date,
+    as_of: Optional[datetime] = None,
+    position_held: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Generate a single daily signal for *symbol*.
 
-    V1 rules:
+    Point-in-time rules (no lookahead):
+    - Only bars with timestamp <= as_of may influence the decision. When
+      as_of is omitted, the full provided history is used and the caller is
+      responsible for having truncated it at the decision time.
+    - The SMA window is the last slow_length bars available at or before
+      as_of, inclusive of the completed bar for the decision date.
     - One signal per symbol per day (the last bar of the day)
-    - SMA fast crosses above SMA slow → BUY
+    - SMA fast crosses above SMA slow → BUY (only when no position held)
+    - If position held: SELL (exit) when the fast SMA crosses below the slow
+      SMA or the position has been held >= max_holding_days
+    - Long-only: never short; SELL only exits an existing long
     - If already at max positions → HOLD (no signal)
-    - If position held > max_holding_days → consider exiting
-    - Long-only: never SELL unless reaching max_holding_days
+
+    position_held is the caller's point-in-time position state for the
+    symbol, e.g. {"days_held": 3}; None means flat.
 
     Returns dict or None (no signal this day).
     """
     if symbol not in bars or not bars[symbol]:
         return None
 
-    bar_list = bars[symbol]
-    # Find the last bar for the current date
-    today_bars = [b for b in bar_list if b["timestamp"].date() == current_date]
+    # Point-in-time history: no bar after as_of may influence the decision
+    if as_of is not None:
+        history = [
+            b
+            for b in bars[symbol]
+            if b["timestamp"] <= as_of and (b.get("available_at") is None or b["available_at"] <= as_of)
+        ]
+    else:
+        history = [b for b in bars[symbol] if b.get("available_at") is None or b["available_at"] <= b["timestamp"]]
+
+    today_bars = [b for b in history if b["timestamp"].date() == current_date]
     if not today_bars:
         return None
 
-    # Need enough history for SMA calculation
-    # In a full backtest we'd maintain rolling windows; here we simplify:
-    # require at least slow_length + 1 historical bars available
-    if len(bar_list) < hypothesis.slow_length + 1:
+    # Need enough history for the slow SMA calculation
+    if len(history) < hypothesis.slow_length:
         return None
 
-    # Calculate SMAs using close prices
-    closes = [b["close"] for b in bar_list[-hypothesis.slow_length - 1 : -1]]
+    # SMA window: last slow_length bars available at or before as_of
+    closes = [b["close"] for b in history[-hypothesis.slow_length :]]
     if len(closes) < hypothesis.slow_length:
         return None
 
     fast_sma = np.mean(closes[-hypothesis.fast_length :]) if hypothesis.fast_length <= len(closes) else None
-    slow_sma = np.mean(closes)  # last 'slow_length' bars
+    slow_sma = np.mean(closes)
 
     if fast_sma is None or slow_sma is None:
         return None
 
-    # Crossover logic: fast crosses above slow → BUY signal
-    # For V1 we only generate BUY signals; exits happen via max_holding_days
-
-    # Check current position count (simplified — in full system query positions)
-    # V1: max 3 positions, long-only
-    # Placeholder: assume we check the global position count elsewhere
+    # Long-only exit logic: SELL only when a position is held
+    if position_held is not None:
+        days_held = int(position_held.get("days_held", 0))
+        if fast_sma < slow_sma or days_held >= hypothesis.max_holding_days:
+            return {
+                "symbol": symbol,
+                "side": "SELL",
+                "quantity": int(position_held.get("quantity", 0)) or max(hypothesis.min_shares, 1),
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+                "price": None,  # market order -> fill at next eligible event
+            }
+        # Still holding within trend and holding window: no signal
+        return None
 
     if fast_sma > slow_sma:
         # Generate BUY signal for 1 share minimum (position sizing handled by

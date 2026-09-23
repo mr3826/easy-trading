@@ -1,9 +1,9 @@
-commit=8b4bc911015da9a4691e02fd91e847664037d1f3
+commit=7f7cab653d1c791aba426a68327e3bbdb577d741
 command=uv run pytest trading-platform/tests/integration/test_postgres_store.py -m postgres -q
-utc=2026-09-16T21:09:19.494671+00:00
+utc=2026-09-22T23:17:54.716127+00:00
 platform=nt
 python=Python 3.14.3
 uv=uv 0.10.9 (f675560f3 2026-03-06)
 exit_code=0
 
-.                                                                        [100%]
+..                                                                       [100%]

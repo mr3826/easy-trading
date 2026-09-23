@@ -175,7 +175,7 @@ def test_simulator_sell_existing_position():
     # Should have sold the position
     assert sell_result.final_positions[inst.symbol].quantity == 0
     # Cash should increase by sell proceeds: 8979 + 108*10 + 1 = 10060
-    assert sell_result.final_cash == 10060.0
+    assert sell_result.final_cash == 10058.0
     # total_pnl should include realized PnL from the sell
     assert sell_result.final_portfolio.total_pnl != 0
     # Realized PnL from selling at 108 - buying at 102 = 60

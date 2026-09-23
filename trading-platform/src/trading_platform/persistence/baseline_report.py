@@ -1,7 +1,5 @@
 """Engineering baseline report.
 
-import json for Phase 4 research harness.
-
 Produces a fixed-symbol baseline report (system test only, NOT strategy evidence).
 
 Per ADR V1 and exit gate G4/S1:
@@ -55,7 +53,7 @@ def compute_profit_factor(win_trades: List[float], loss_trades: List[float]) -> 
 
 
 def compute_sharpe(returns: List[float], risk_free: float = 0.0) -> Optional[float]:
-    """Compute annualized Sharpe ratio (V1: simplified monthly -> annualized)."""
+    """Compute annualized Sharpe ratio (V1: daily returns annualized with sqrt(252))."""
     if len(returns) < 2:
         return None
     return_array = np.array(returns, dtype=float)
@@ -97,9 +95,16 @@ def compute_max_drawdown(equity_curve: List[float]) -> float:
     return round(max_dd, 4)
 
 
-def compute_turnover(total_buy: int, total_sell: int) -> float:
-    """Compute total turnover ratio."""
-    return float(total_buy + total_sell)
+def compute_turnover(total_buy: int, total_sell: int, equity: Optional[float] = None) -> float:
+    """Compute turnover: traded share volume relative to an equity base.
+
+    Returns (total_buy + total_sell) / equity when an equity base is
+    provided; otherwise the raw traded share count.
+    """
+    traded = float(total_buy + total_sell)
+    if equity is None or equity <= 0:
+        return traded
+    return round(traded / equity, 4)
 
 
 def compute_win_loss_distribution(
@@ -236,6 +241,40 @@ class EngineeringBaselineReport:
             return 0.0
         return (end - start) / start
 
+    def _get_equity_curve(self) -> List[float]:
+        """Equity per recorded snapshot: cash plus marked position value.
+
+        Position market values are marked at fill price and not re-marked to
+        later bars, so this curve is an approximation of economic equity.
+        """
+        curve = []
+        for snapshot in self.result.portfolio_series:
+            market_value = sum(pos.market_value for pos in snapshot.positions.values())
+            curve.append(snapshot.cash + market_value)
+        return curve
+
+    def _get_turnover(self) -> float:
+        """Turnover from the trade ledger, relative to starting equity."""
+        total_buy = 0
+        total_sell = 0
+        for event in self.result.trade_ledger:
+            if event.event_type == "FILL":
+                detail = event.detail or {}
+                fill_qty = int(detail.get("fill_quantity", 0))
+                if fill_qty > 0:
+                    total_buy += fill_qty
+                elif fill_qty < 0:
+                    total_sell += abs(fill_qty)
+        return compute_turnover(total_buy, total_sell, equity=self._get_starting_cash())
+
+    def _get_gross_exposure_pct(self) -> Optional[float]:
+        """Gross exposure as a percentage of economic equity (cash + market value)."""
+        gross = float(self.result.final_portfolio.gross_exposure)
+        equity = self._get_final_cash() + sum(pos.market_value for pos in self.result.final_positions.values())
+        if equity <= 0:
+            return None
+        return round(gross / equity * 100, 2)
+
     # -----------------------------------------------------------------
     # Trade-level metrics
 
@@ -354,10 +393,10 @@ class EngineeringBaselineReport:
             },
             # Risk metrics
             "risk": {
-                "max_drawdown": None,  # would need full equity curve
-                "turnover": None,  # would need cumulative turnover
+                "max_drawdown": compute_max_drawdown(self._get_equity_curve()),
+                "turnover": self._get_turnover(),
                 "concentration": concentration,
-                "gross_exposure_pct": None,  # would need equity base
+                "gross_exposure_pct": self._get_gross_exposure_pct(),
                 "cash_reserve_pct": round((self._get_final_cash() / self._get_starting_cash()) * 100, 2),
             },
             # MAE/MFE
@@ -369,8 +408,8 @@ class EngineeringBaselineReport:
             },
             # Determinism verification
             "determinism": {
-                "replay_consistent": None,  # set by test harness
-                "seed": self.simulator._seed if hasattr(self.simulator, "_seed") else None,
+                "replay_consistent": None,  # verified by the harness via deterministic reruns
+                "seed": getattr(self.simulator, "seed", None),
             },
             # Generation metadata
             "generated_at": self.timestamp.isoformat() + "Z",

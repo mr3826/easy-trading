@@ -10,6 +10,7 @@ from trading_platform.domain import (
     Bar,
     BrokerSnapshot,
     CorporateAction,
+    CorporateActionType,
     Instrument,
     JournalEvent,
     Order,
@@ -94,14 +95,17 @@ def test_illegal_order_transition_rejection():
     assert order.status != OrderStatus.FILLED
 
 
-def test_environment_credential_mismatch_rejection():
-    """paper config cannot load live credentials automatically."""
-    # This is verified by CI test — paper environment must not resolve live creds
-    from trading_platform.domain import Instrument
+def test_environment_credential_mismatch_rejection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """paper/research config cannot enable live credentials via environment flags."""
+    from trading_platform.config import load_config
 
-    inst = Instrument(symbol="AAPL")
-    # The configuration contract test will enforce this
-    assert inst.symbol == "AAPL"
+    monkeypatch.setenv("TRADING_ENV", "paper")
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+    monkeypatch.setenv("LIVE_STATUS", "AUTHORIZED")
+    config = load_config()
+    assert config.environment == "paper"
+    assert config.live_trading_enabled is False
+    assert config.live_status == "NOT_AUTHORIZED"
 
 
 def test_duplicate_event_idempotency():
@@ -164,8 +168,8 @@ def test_deterministic_id_time_replay():
 
 
 def test_secret_redaction():
-    """Sensitive data must not be stored raw in event payloads."""
-    from trading_platform.domain import JournalEvent
+    """Sensitive payload values must be masked before storage/output."""
+    from trading_platform.domain import JournalEvent, redact_secrets
 
     inst = Instrument(symbol="AAPL")
     event = JournalEvent(
@@ -175,16 +179,17 @@ def test_secret_redaction():
         code_version="v1.0.0",
         config_version="v1.0.0",
         event_type="order_submitted",
-        payload={"api_key": "sk-live-abc123", "instrument": inst.symbol},
+        payload={"api_key": "PLACEHOLDER-TRADING-TEST-KEY", "instrument": inst.symbol, "quantity": 10},
         source="strategy",
         checksum="hash",
     )
 
-    # Verify the payload stores the secret but the test can inspect it
-    assert "api_key" in event.payload
-    assert event.payload["api_key"] == "sk-live-abc123"
-    # The event stores data; redaction happens at log-output time, not at storage
-    # This test verifies the event can be created with secret-containing payload
+    redacted = redact_secrets(event.payload)
+    assert redacted["api_key"] == "***REDACTED***"
+    assert "PLACEHOLDER-TRADING-TEST-KEY" not in redacted.values()
+    assert redacted["instrument"] == inst.symbol
+    assert redacted["quantity"] == 10
+    assert redacted is not event.payload
 
 
 def test_portfolio_snapshot_immutability():
@@ -299,12 +304,13 @@ def test_corporate_action_split():
     inst = Instrument(symbol="AAPL")
     split = CorporateAction(
         instrument=inst,
-        action_type="split",
+        action_type=CorporateActionType.SPLIT,
         ex_date=datetime(2026, 6, 15, tzinfo=timezone.utc),
         ratio=2.0,
     )
     assert split.ratio == 2.0
-    assert split.action_type == "split"
+    assert split.action_type == CorporateActionType.SPLIT
+    assert split.action_type.value == "split"
 
 
 def test_corporate_action_dividend():
@@ -312,14 +318,34 @@ def test_corporate_action_dividend():
     inst = Instrument(symbol="AAPL")
     dividend = CorporateAction(
         instrument=inst,
-        action_type="dividend",
+        action_type=CorporateActionType.DIVIDEND,
         ex_date=datetime(2026, 12, 1, tzinfo=timezone.utc),
         record_date=datetime(2026, 11, 15, tzinfo=timezone.utc),
         pay_date=datetime(2026, 12, 15, tzinfo=timezone.utc),
         cash_amount=1.50,
     )
     assert dividend.cash_amount == 1.50
-    assert dividend.action_type == "dividend"
+    assert dividend.action_type == CorporateActionType.DIVIDEND
+    assert dividend.action_type.value == "dividend"
+
+
+def test_corporate_action_validation_rejects_invalid_economics():
+    """Split actions require a positive ratio; dividends require positive cash."""
+    inst = Instrument(symbol="AAPL")
+    with pytest.raises(ValueError):
+        _ = CorporateAction(
+            instrument=inst,
+            action_type=CorporateActionType.SPLIT,
+            ex_date=datetime(2026, 6, 15, tzinfo=timezone.utc),
+            ratio=0.0,
+        )
+    with pytest.raises(ValueError):
+        _ = CorporateAction(
+            instrument=inst,
+            action_type=CorporateActionType.DIVIDEND,
+            ex_date=datetime(2026, 12, 1, tzinfo=timezone.utc),
+            cash_amount=-1.50,
+        )
 
 
 def test_order_with_risk_decision():
