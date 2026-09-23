@@ -179,14 +179,14 @@ def test_secret_redaction():
         code_version="v1.0.0",
         config_version="v1.0.0",
         event_type="order_submitted",
-        payload={"api_key": "sk-live-abc123", "instrument": inst.symbol, "quantity": 10},
+        payload={"api_key": "PLACEHOLDER-TRADING-TEST-KEY", "instrument": inst.symbol, "quantity": 10},
         source="strategy",
         checksum="hash",
     )
 
     redacted = redact_secrets(event.payload)
     assert redacted["api_key"] == "***REDACTED***"
-    assert "sk-live-abc123" not in redacted.values()
+    assert "PLACEHOLDER-TRADING-TEST-KEY" not in redacted.values()
     assert redacted["instrument"] == inst.symbol
     assert redacted["quantity"] == 10
     assert redacted is not event.payload
