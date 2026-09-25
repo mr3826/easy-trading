@@ -23,3 +23,9 @@ Authoritative snapshots:
 
 All strategy conclusions remain **REQUIRES FORWARD EVIDENCE** / **REQUIRES EXTERNAL SETUP**
 (real universe data). Live trading remains **NOT AUTHORIZED**.
+
+Reconciliation pass (2026-09-25): stale Phases 7–12 checklist reconciled to reality in
+[TASK_RECONCILIATION.md](TASK_RECONCILIATION.md); lookahead/commission/PBO/DSR defects in
+the research path fixed; `monitoring/paper_evidence.PaperEvidenceTracker` added; PIT
+universe-membership filtering supported in the research runner; debug scratch archived to
+`archive/legacy-scratch/`.

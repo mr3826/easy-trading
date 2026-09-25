@@ -90,8 +90,9 @@ orchestrator. No self-retuning.
 Added: feature engine (correctness/warmup/no-lookahead), regimes, trade planning, strategy
 candidates, gap-through-stop backtest, reverification stats, promotion gate, orchestrator,
 kill switches, drift, sizing property tests, and a synthetic end-to-end research-runner
-integration test. Total suite: **306 passed, 2 skipped (PostgreSQL-service), 2 deselected
-(external IBKR)** vs 228 at baseline. No existing test weakened.
+integration test. Total suite: **321 passed, 2 skipped (PostgreSQL-service), 2 deselected
+(external IBKR)** vs 228 at baseline (see §21 for the reconciliation run). No existing test
+weakened.
 
 ## 12. Coverage
 
@@ -156,3 +157,38 @@ plus a benchmark, then run `scripts/run_strategy_research.py` per family, review
 generated report, and allow the promotion gate to decide. If a family is APPROVED, start
 shadow operation (`shadow-operator-guide.md`) to accumulate forward evidence before any
 autonomous paper session.
+
+## 21. Addendum — reconciliation run (2026-09-25)
+
+Full task-source audit reconciled the stale Phases 7–12 checklist against actual code and
+tests: see `docs/TASK_RECONCILIATION.md` (authoritative) and the rewritten
+`remaining_todos.md` ([x]/[~]/[ ] legend). Genuine defects found and fixed during this pass:
+
+1. Research backtester trailing-stop used the **same bar's close/ATR** to set a stop and
+   evaluate that same bar's low — a lookahead. Fixed: exits use the stop knowable at the
+   bar open; regression test added.
+2. Research entry sizing priced risk against the stale signal close and ignored entry
+   commission; now sized at the actual fill with commission + 20% notional cap (parity
+   with production `SizingPolicy`).
+3. Production `size_position` cash clamp did not reserve the entry commission (could
+   overdraw settled cash at the boundary). Fixed with unit + property tests.
+4. DSR fallback selection-bias scale had a units error for annualized Sharpe. Fixed;
+   regression test.
+5. PBO could crash on thin data or over-trust 2-row blocks. `effective_pbo_blocks`
+   (≥5 rows/block) + fail-closed `INSUFFICIENT_DATA` reporting added; promotion then
+   rejects on missing PBO evidence.
+6. Orchestrator re-checks the kill switch and the promotion artifact immediately before
+   every submission (mid-cycle operator latch / approval deletion now fail closed, tested).
+7. Research runner promotion artifacts no longer silently write to the CWD
+   (explicit `promotions_root`, tested).
+
+Completed previously-existing capability gaps: `PaperEvidenceTracker`
+(`monitoring/paper_evidence.py`) makes all Phase 10 evidence questions automatically
+answerable from real events; point-in-time universe membership filtering added to the
+research path so the survivorship ceiling is only removed by real PIT membership data;
+CI now triggers on `feature/*` pushes; obsolete tracked debug scripts moved to
+`archive/legacy-scratch/` with provenance notes; implemented ADRs re-marked Accepted.
+
+Verification after reconciliation: ruff check/format clean, mypy clean (53 files),
+321 passed / 2 skipped / 2 deselected, coverage 88%, critical-path coverage 94%,
+secret scan clean, pip-audit clean.

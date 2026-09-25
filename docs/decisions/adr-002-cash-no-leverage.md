@@ -1,7 +1,7 @@
 # ADR-002: Cash Account, No Leverage
 
 ## Status
-Proposed
+Accepted — implemented and CI-verified (2026-09-25)
 
 ## Context
 The account model must be specified for V1. Cash-only eliminates margin calls, liquidation risk, and complex borrowing costs.

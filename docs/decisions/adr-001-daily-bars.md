@@ -1,7 +1,7 @@
 # ADR-001: Daily Bars as Only Timeframe
 
 ## Status
-Proposed
+Accepted — implemented and CI-verified (2026-09-25)
 
 ## Context
 The trading platform must select a single bar timeframe for V1. The execution plan explicitly states daily bars as the V1 timeframe.

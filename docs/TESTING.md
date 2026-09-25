@@ -23,5 +23,5 @@ Strategy: [test-strategy.md](test-strategy.md). CI: `.github/workflows/ci.yml`.
 `pytest -m "not external"` + coverage >=80% (>=90% on oms/risk/reconciliation/authorization) |
 `pip-audit` | gitleaks.
 
-Current: 306 passed, 2 skipped (pg-dependent), 2 deselected (external). Quality gates were
+Current: 321 passed, 2 skipped (pg-dependent), 2 deselected (external). Quality gates were
 not relaxed to achieve this.

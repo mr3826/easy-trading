@@ -1,7 +1,7 @@
 # ADR-006: Execution Adapter Pattern
 
 ## Status
-Proposed
+Accepted — implemented and CI-verified (2026-09-25)
 
 ## Context
 The platform must interface with multiple execution environments (simulator, shadow, IBKR paper, live) without leaking broker-specific types into the domain layer.
