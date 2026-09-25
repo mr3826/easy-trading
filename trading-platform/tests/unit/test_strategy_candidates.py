@@ -145,6 +145,78 @@ def test_backtest_gap_through_stop_not_filled_at_stop() -> None:
         assert t.exit_price < 100.0
 
 
+def test_backtest_no_trailing_stop_same_bar_lookahead() -> None:
+    """The stop governing day t must be knowable from data through t-1 only."""
+    idx = pd.DatetimeIndex(pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"]))
+    df = pd.DataFrame(
+        {
+            "open": [100.0, 100.0, 120.0, 196.0],
+            "high": [101.0, 101.0, 201.0, 197.0],
+            "low": [99.0, 99.0, 190.0, 180.0],
+            "close": [100.0, 100.0, 200.0, 195.0],
+            "volume": [1e6] * 4,
+            "atr": [2.0] * 4,
+        },
+        index=idx,
+    )
+
+    class _Ev:
+        eligible = True
+        raw_signal = "BUY"
+        signal_score = 1.0
+        initial_stop = 95.0
+        expected_entry = 100.0
+
+    def signal_fn(symbol, hist, regime, params, ts):
+        if len(hist) == 1:
+            return _Ev()
+        return None
+
+    cfg = BacktestConfig(max_holding_days=99, atr_trailing_multiple=3.0, max_positions=1)
+    res = run_backtest({"AAA": df}, signal_fn, object(), None, cfg)
+    assert len(res.trades) == 1
+    trade = res.trades[0]
+    # With same-bar lookahead the trailing stop derived from the 01-03 close
+    # (200-6=194) would trigger against the 01-03 low (190) on the same bar.
+    # Correct behavior: 01-03 is evaluated against the stop known at its open
+    # (95) -> no exit; the ratcheted 194 stop exits on 01-04.
+    assert trade.exit_date == idx[3]
+    assert trade.exit_reason == "atr_stop"
+
+
+def test_backtest_membership_excludes_non_members() -> None:
+    idx = pd.date_range("2024-01-01", periods=10, freq="B")
+    frames = {
+        s: pd.DataFrame(
+            {"open": np.full(10, 100.0), "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1e6, "atr": 2.0},
+            index=idx,
+        )
+        for s in ("AAA", "BBB")
+    }
+
+    class _Ev:
+        eligible = True
+        raw_signal = "BUY"
+        signal_score = 1.0
+        initial_stop = 95.0
+        expected_entry = 100.0
+
+    def signal_fn(symbol, hist, regime, params, ts):
+        if len(hist) == 2:
+            return _Ev()
+        return None
+
+    member_day = idx[2]
+    membership = {d: {"AAA"} for d in idx}
+    cfg = BacktestConfig(max_positions=2, max_holding_days=1, atr_stop_multiple=999.0)
+
+    unrestricted = run_backtest(frames, signal_fn, object(), None, cfg)
+    restricted = run_backtest(frames, signal_fn, object(), None, cfg, member_fn=lambda d: membership.get(d, set()))
+    assert {t.symbol for t in unrestricted.trades} == {"AAA", "BBB"}
+    assert {t.symbol for t in restricted.trades} == {"AAA"}
+    assert member_day in idx
+
+
 def test_backtest_cost_multiplier_reduces_pnl() -> None:
     df = _trending_frame(300)
     df = df.assign(atr_window14=2.0)

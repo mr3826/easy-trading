@@ -301,6 +301,27 @@ class PaperOrchestrator:
                 )
                 continue
             approved_count += 1
+            # Re-check the kill switch immediately before submission: a
+            # condition latched mid-cycle (operator halt, incident, market
+            # close) must stop later plans even though preflight passed.
+            recheck = self.kill_switch.evaluate(
+                health,
+                risk_engine_blocked=risk_engine_blocked,
+                strategy_approved=self._strategy_approval() is not None,
+                strategy_drift_disabled=drift_disabled,
+            )
+            if not recheck.allow_new_exposure:
+                self.journal.append(
+                    {
+                        "decision_id": decision_id,
+                        "cycle_id": cycle_id,
+                        "event": "submission_withheld_killswitch_midcycle",
+                        "blocked_conditions": recheck.blocked_conditions,
+                        "plan": plan.to_dict(),
+                        "at": current.isoformat(),
+                    }
+                )
+                break
             if not self.reconciliation_healthy():
                 self.journal.append(
                     {

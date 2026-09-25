@@ -261,6 +261,52 @@ def test_orchestrator_version_mismatch_blocks() -> None:
         orch.run_cycle("c", _healthy(datetime.now(timezone.utc)), [_evidence(version="1.0.0")], _plan_builder)
 
 
+def test_killswitch_midcycle_blocks_second_submission(tmp_path: Path) -> None:
+    _approval(tmp_path)
+    submissions: list = []
+    orch = _orchestrator(tmp_path, submissions)
+    now = datetime.now(timezone.utc)
+
+    def submit(plan, did):
+        submissions.append((plan.symbol, did))
+        if len(submissions) == 1:
+            orch.kill_switch.latch("incident_recon", "mid-cycle reconciliation failure")
+        return True, "PAPER-1"
+
+    orch.submit_plan = submit
+    ev1 = _evidence(symbol="AAA", score=2.0)
+    ev2 = _evidence(symbol="BBB", score=1.0)
+    result = orch.run_cycle("cycle-1", _healthy(now), [ev1, ev2], _plan_builder, now=now)
+    # First submission happened; the latch must stop the second even though
+    # preflight passed before the cycle began.
+    assert len(submissions) == 1
+    assert result.plans_submitted == 1
+    journal_text = orch.journal.path.read_text()
+    assert "submission_withheld_killswitch_midcycle" in journal_text
+
+
+def test_orchestrator_stops_when_approval_vanishes_midcycle(tmp_path: Path) -> None:
+    _approval(tmp_path)
+    submissions: list = []
+    orch = _orchestrator(tmp_path, submissions)
+    now = datetime.now(timezone.utc)
+    approvals_dir = tmp_path / "promotions" / "trend_rs"
+
+    def submit(plan, did):
+        submissions.append(plan.symbol)
+        for f in approvals_dir.glob("*.json"):
+            f.unlink()
+        return True, "PAPER-1"
+
+    orch.submit_plan = submit
+    ev1 = _evidence(symbol="AAA", score=2.0)
+    ev2 = _evidence(symbol="BBB", score=1.0)
+    result = orch.run_cycle("cycle-1", _healthy(now), [ev1, ev2], _plan_builder, now=now)
+    assert len(submissions) == 1
+    assert result.plans_submitted == 1
+    assert "submission_withheld_killswitch_midcycle" in orch.journal.path.read_text()
+
+
 def test_drift_disabled_blocks_new_positions(tmp_path: Path) -> None:
     _approval(tmp_path)
     submissions: list = []

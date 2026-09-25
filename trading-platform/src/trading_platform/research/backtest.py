@@ -55,6 +55,7 @@ class BacktestConfig:
     max_holding_days: int = 30
     atr_stop_multiple: float = 2.5
     atr_trailing_multiple: float = 3.0
+    max_position_notional_pct: float = 0.20
     cost: CostModel = CostModel()
     version: str = BACKTESTER_VERSION
 
@@ -103,13 +104,24 @@ class BacktestResult:
         return out
 
 
-def _size(equity: float, entry: float, stop: float, risk_fraction: float, cash: float) -> int:
+def _size(
+    equity: float,
+    entry: float,
+    stop: float,
+    risk_fraction: float,
+    cash: float,
+    order_cost: float,
+    notional_cap: float,
+) -> int:
+    """Risk-based sizing at the ACTUAL fill price, clamped by cash (incl.
+    commission), position notional cap, and equity."""
     risk_per_share = entry - stop
     if risk_per_share <= 0 or entry <= 0:
         return 0
     qty = math.floor(equity * risk_fraction / risk_per_share)
-    qty_afford = math.floor(cash / entry)
-    return int(max(0, min(qty, qty_afford)))
+    qty_afford = math.floor(max(cash - order_cost, 0.0) / entry)
+    qty_notional = math.floor(notional_cap / entry)
+    return int(max(0, min(qty, qty_afford, qty_notional)))
 
 
 def run_backtest(
@@ -118,8 +130,14 @@ def run_backtest(
     params: Any,
     regimes_by_date: Optional[Mapping[Any, Any]],
     config: Optional[BacktestConfig] = None,
+    member_fn: Optional[Any] = None,
 ) -> BacktestResult:
     """Run a long-only multi-symbol backtest over per-symbol feature frames.
+
+    ``member_fn(decision_day) -> set[str]`` optionally restricts entry
+    candidates to point-in-time universe membership at the decision day;
+    when provided, symbols outside membership are never even evaluated
+    (removes survivorship bias only if the membership data itself is PIT).
 
     Each feature frame is indexed by date and must include OHLC columns plus
     the strategy's feature columns. ``signal_fn(symbol,
@@ -144,6 +162,8 @@ def run_backtest(
 
     for i, day in enumerate(all_dates):
         # -- mark-to-market & exits on today's bar ------------------------
+        # The stop enforced against today's bar must be fully knowable from
+        # data up to the previous bar: exits first, trailing update after.
         for symbol in list(positions):
             df = features_by_symbol[symbol]
             if day not in df.index:
@@ -154,16 +174,8 @@ def run_backtest(
             exit_reason = ""
             gap = False
 
-            # Trailing stop update uses today's ATR and the highest close
-            # since entry; evaluated against today's LOW.
-            atr_v = bar.get(pos["atr_col"])
-            if atr_v is not None and math.isfinite(float(atr_v)):
-                pos["highest_close"] = max(pos["highest_close"], float(bar["close"]))
-                trail = pos["highest_close"] - cfg.atr_trailing_multiple * float(atr_v)
-                pos["stop"] = max(pos["stop"], trail)
-
             stop = pos["stop"]
-            if math.isfinite(float(bar["open"])) and float(bar["open"]) <= stop and float(bar["open"]) < stop:
+            if math.isfinite(float(bar["open"])) and float(bar["open"]) < stop:
                 # GAP THROUGH STOP: filled at the open, not the stop.
                 exit_price = float(bar["open"]) - cfg.cost.slip(float(bar["open"]))
                 exit_reason = "gap_through_stop"
@@ -194,6 +206,16 @@ def run_backtest(
                     )
                 )
                 del positions[symbol]
+                continue
+
+            # Still holding: ratchet the trailing stop with TODAY's data so
+            # the new stop only ever governs the NEXT bar (no same-bar
+            # lookahead on close/ATR).
+            atr_v = bar.get(pos["atr_col"])
+            pos["highest_close"] = max(pos["highest_close"], float(bar["close"]))
+            if atr_v is not None and math.isfinite(float(atr_v)):
+                trail = pos["highest_close"] - cfg.atr_trailing_multiple * float(atr_v)
+                pos["stop"] = max(pos["stop"], trail)
 
         equity = cash + sum(
             float(features_by_symbol[s].loc[day, "close"]) * p["quantity"]
@@ -215,6 +237,8 @@ def run_backtest(
         for symbol, df in features_by_symbol.items():
             if symbol in positions or prev_day not in df.index or day not in df.index:
                 continue
+            if member_fn is not None and symbol not in member_fn(prev_day):
+                continue
             hist = df.loc[:prev_day]
             evidence = signal_fn(symbol, hist, regime, params, str(prev_day))
             if evidence is not None and getattr(evidence, "eligible", False) and evidence.raw_signal == "BUY":
@@ -228,7 +252,15 @@ def run_backtest(
                 continue
             entry_price = float(open_price) + cfg.cost.slip(float(open_price))
             stop = float(evidence.initial_stop)
-            qty = _size(equity, entry_price, stop, cfg.risk_fraction, cash)
+            qty = _size(
+                equity,
+                entry_price,
+                stop,
+                cfg.risk_fraction,
+                cash,
+                cfg.cost.order_cost(),
+                equity * cfg.max_position_notional_pct,
+            )
             if qty < 1:
                 continue
             atr_value = evidence_atr(evidence, df, prev_day, cfg)

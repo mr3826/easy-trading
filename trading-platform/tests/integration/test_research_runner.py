@@ -90,6 +90,28 @@ def test_research_runner_records_all_trials(tmp_path: Path) -> None:
 
 
 @pytest.mark.integration
+def test_membership_removes_survivorship_ceiling(tmp_path: Path) -> None:
+    universe, benchmark = _universe()
+    symbols = sorted(universe)
+    membership = {d: set(symbols[:3]) for d in benchmark.index}
+    report = run_family_research(
+        "trend_relative_strength",
+        universe,
+        benchmark,
+        param_grid=[{"momentum_window": 63, "rs_window": 63}],
+        n_folds=3,
+        min_train=252,
+        embargo=30,
+        bootstrap=BootstrapConfig(n_resamples=50, block_length=10, seed=7),
+        output_dir=tmp_path,
+        promotions_root=tmp_path / "promotions",
+        universe_membership=membership,
+    )
+    assert report["evidence_ceiling"] == "FULL_OOS_CAPABLE"
+    assert not any("survivorship" in b for b in report["known_biases"])
+
+
+@pytest.mark.integration
 def test_load_universe_requires_setup(tmp_path: Path) -> None:
     with pytest.raises(ExternalSetupRequired):
         load_parquet_universe(tmp_path / "missing", ["SPY"])

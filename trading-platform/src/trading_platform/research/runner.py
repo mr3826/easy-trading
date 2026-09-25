@@ -22,7 +22,7 @@ import json
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -116,6 +116,7 @@ def run_family_research(
     output_dir: Optional[Path] = None,
     promotions_root: Optional[Path] = None,
     universe_is_point_in_time: bool = False,
+    universe_membership: Optional[Mapping[Any, Sequence[str]]] = None,
 ) -> Dict[str, Any]:
     """Full reverification for one strategy family. Returns the report dict."""
     if family_name not in STRATEGY_FAMILIES or STRATEGY_FAMILIES[family_name][1] is None:
@@ -153,6 +154,18 @@ def run_family_research(
     family_id = f"{family_name}@{_dataset_hash(frames)[:12]}"
     family_ev = FamilyEvidence(family_id, trial_count=len(param_objects), config_ids=[c for c, _ in param_objects])
 
+    # Optional point-in-time universe membership: decision day -> member set.
+    member_fn = None
+    if universe_membership:
+        import bisect
+
+        member_dates = sorted(universe_membership)
+        member_sets = {d: set(symbols) for d, symbols in universe_membership.items()}
+
+        def member_fn(decision_day: Any) -> Set[str]:
+            idx = bisect.bisect_right(member_dates, decision_day) - 1
+            return member_sets[member_dates[idx]] if idx >= 0 else set()
+
     config_results: List[ConfigResult] = []
     config_full_returns: Dict[str, np.ndarray] = {}
     per_config_reports: List[Dict[str, Any]] = []
@@ -166,7 +179,7 @@ def run_family_research(
         for fold in folds:
             test_days = cal[fold.test_start : fold.test_end]
             sub_frames = {s: df.loc[: test_days[-1]] for s, df in frames.items()}
-            res = run_backtest(sub_frames, signal_fn, params, regimes_by_date, cfg)
+            res = run_backtest(sub_frames, signal_fn, params, regimes_by_date, cfg, member_fn)
             dr = res.daily_returns
             in_test = dr.loc[[d for d in dr.index if d in set(test_days)]]
             oos_returns.extend(float(v) for v in in_test.to_numpy())
@@ -197,7 +210,7 @@ def run_family_research(
             for fold in folds:
                 test_days = cal[fold.test_start : fold.test_end]
                 sub_frames = {s: df.loc[: test_days[-1]] for s, df in frames.items()}
-                res = run_backtest(sub_frames, signal_fn, params, regimes_by_date, stress_cfg)
+                res = run_backtest(sub_frames, signal_fn, params, regimes_by_date, stress_cfg, member_fn)
                 dr = res.daily_returns
                 in_test = dr.loc[[d for d in dr.index if d in set(test_days)]]
                 oos_r.extend(float(v) for v in in_test.to_numpy())
@@ -264,6 +277,7 @@ def run_family_research(
         key=lambda r: r.get("metrics", {}).get("sharpe", float("-inf")),
         default=None,
     )
+    pit_universe = universe_is_point_in_time or universe_membership is not None
     summary = {
         "family_id": family_id,
         "family_name": family_name,
@@ -287,13 +301,13 @@ def run_family_research(
             ],
         },
         "known_biases": []
-        if universe_is_point_in_time
+        if pit_universe
         else [
             "survivorship/universe bias: universe is not point-in-time constituent membership",
             "daily bars only: intraday fills modeled, not observed",
             "costs modeled (fixed commission + slippage); spreads approximated, not observed",
         ],
-        "evidence_ceiling": ("FULL_OOS_CAPABLE" if universe_is_point_in_time else "CAPPED: universe bias present"),
+        "evidence_ceiling": ("FULL_OOS_CAPABLE" if pit_universe else "CAPPED: universe bias present"),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "version": RESEARCH_RUNNER_VERSION,
     }
