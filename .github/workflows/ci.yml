@@ -3,7 +3,7 @@ name: Verification
 on:
   pull_request:
   push:
-    branches: [main, fix/verified-platform-foundation]
+    branches: [main, fix/verified-platform-foundation, "feature/*"]
 
 jobs:
   verify:
