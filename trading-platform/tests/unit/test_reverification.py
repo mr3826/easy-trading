@@ -75,6 +75,49 @@ def test_dsr_penalizes_many_trials() -> None:
     assert many["dsr"] <= few["dsr"] + 1e-9
 
 
+def test_dsr_fallback_scale_shrinks_with_sample_size() -> None:
+    """The null selection-bias scale must shrink with more data, in correct
+    annualized-Sharpe units (regression test for a units bug)."""
+    rng = np.random.default_rng(24)
+    small = rng.normal(0.0005, 0.01, 252)
+    large = rng.normal(0.0005, 0.01, 2520)
+    d_small = deflated_sharpe_ratio(small, 100)
+    d_large = deflated_sharpe_ratio(large, 100)
+    assert d_large["sharpe_std"] < d_small["sharpe_std"]
+    assert d_small["expected_max_sharpe"] < 10.0  # sane annualized units
+
+
+def test_effective_pbo_blocks_guards_thin_data() -> None:
+    from trading_platform.validation.statistics import effective_pbo_blocks
+
+    assert effective_pbo_blocks(1600, 16) == 16
+    assert effective_pbo_blocks(80, 16) == 16
+    assert effective_pbo_blocks(50, 16) == 10
+    assert effective_pbo_blocks(20, 16) == 4
+    assert effective_pbo_blocks(10, 16) is None
+    assert effective_pbo_blocks(7, 16) is None
+
+
+def test_engine_reports_insufficient_pbo_fail_closed() -> None:
+    """Thin OOS data must produce pbo=1.0 INSUFFICIENT_DATA, never a crash
+    and never a silently-missing (optimistic) field."""
+    from trading_platform.validation.engine import ConfigResult, FamilyEvidence, validate_configuration
+
+    rng = np.random.default_rng(25)
+    result = ConfigResult(
+        config_id="c1",
+        params={"w": 10},
+        daily_returns=rng.normal(0.0005, 0.01, 10),
+    )
+    report = validate_configuration(
+        result,
+        FamilyEvidence("fam", 1, ["c1"]),
+        pbo_returns_matrix=rng.normal(0, 0.01, (10, 2)),
+    )
+    assert report["pbo"]["status"] == "INSUFFICIENT_DATA"
+    assert report["pbo"]["pbo"] == 1.0
+
+
 def test_pbo_low_when_ranking_persists_oos() -> None:
     n, t = 6, 1600
     rng = np.random.default_rng(5)

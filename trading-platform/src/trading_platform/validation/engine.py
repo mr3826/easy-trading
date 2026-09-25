@@ -32,6 +32,7 @@ from trading_platform.validation.statistics import (
     calmar_ratio,
     cscv_pbo,
     deflated_sharpe_ratio,
+    effective_pbo_blocks,
     longest_drawdown_days,
     max_consecutive_losses,
     max_drawdown,
@@ -122,7 +123,11 @@ def validate_configuration(
         report["bootstrap"] = bootstrap_distribution(r, bootstrap)
 
     if pbo_returns_matrix is not None:
-        report["pbo"] = cscv_pbo(np.asarray(pbo_returns_matrix, dtype=float), n_blocks=pbo_blocks)
+        blocks = effective_pbo_blocks(len(pbo_returns_matrix), pbo_blocks)
+        if blocks is None:
+            report["pbo"] = {"pbo": 1.0, "status": "INSUFFICIENT_DATA", "n_configs": float(len(pbo_returns_matrix[0]))}
+        else:
+            report["pbo"] = cscv_pbo(np.asarray(pbo_returns_matrix, dtype=float), n_blocks=blocks)
 
     if result.benchmark_returns is not None:
         report["benchmark"] = benchmark_comparison(r, np.asarray(result.benchmark_returns, dtype=float))

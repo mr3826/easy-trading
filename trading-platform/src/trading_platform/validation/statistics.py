@@ -258,9 +258,11 @@ def deflated_sharpe_ratio(
     if trial_sharpes and len(trial_sharpes) >= 2:
         sr_std = float(np.std(np.asarray(trial_sharpes, dtype=float), ddof=1))
     else:
-        # Conservative scale: sampling std of the Sharpe itself.
+        # Conservative scale: sampling std of the ANNUALIZED Sharpe under
+        # normality, Var(SR_ann) ~= periods * (1 + SR_daily^2 / 2) / (T - 1).
         n = r.size
-        sr_std = math.sqrt(max(1e-12, (1.0 + 0.5 * sr**2) / (n / periods)))
+        sr_daily = sr / math.sqrt(periods)
+        sr_std = math.sqrt(periods * (1.0 + 0.5 * sr_daily**2) / (n - 1))
     emax = expected_max_sharpe(n_trials, sr_std)
     psr = probabilistic_sharpe_ratio(r, benchmark_sharpe=emax, periods=periods)
     return {
@@ -274,6 +276,18 @@ def deflated_sharpe_ratio(
 
 # ---------------------------------------------------------------------------
 # Probability of backtest overfitting (CSCV)
+
+
+def effective_pbo_blocks(n_rows: int, requested: int = 16) -> Optional[int]:
+    """Largest usable even CSCV block count, or None when evidence is too thin.
+
+    Requires at least 5 rows per block (a 2-row Sharpe is meaningless);
+    callers must treat None as "PBO evidence unavailable" (fail closed).
+    """
+    usable = min(requested, n_rows // 5)
+    if usable < 4:
+        return None
+    return usable - (usable % 2)
 
 
 def cscv_pbo(returns_matrix: ndarray, n_blocks: int = 16) -> Dict[str, float]:

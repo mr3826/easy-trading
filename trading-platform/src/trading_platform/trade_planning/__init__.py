@@ -194,6 +194,7 @@ class SizingPolicy:
     min_cash_reserve_pct: float = 0.05
     max_positions: int = 3
     max_quantity: int = 100_000
+    commission_per_order: float = 1.0
     version: str = TRADE_PLANNING_VERSION
 
     def __post_init__(self) -> None:
@@ -265,9 +266,9 @@ def size_position(
     risk_budget = portfolio.equity * policy.risk_fraction
     qty_risk = math.floor(risk_budget / risk_per_share)
 
-    # Cash: entry capital plus reserve.
+    # Cash: entry capital plus reserve plus the entry-side commission.
     cash_available = portfolio.settled_cash - portfolio.equity * policy.min_cash_reserve_pct
-    qty_cash = math.floor(max(cash_available, 0.0) / entry)
+    qty_cash = math.floor(max(cash_available - policy.commission_per_order, 0.0) / entry)
 
     # Notional / exposure caps.
     qty_notional = math.floor(portfolio.equity * policy.max_position_notional_pct / entry)

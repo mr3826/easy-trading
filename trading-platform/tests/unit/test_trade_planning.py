@@ -71,9 +71,18 @@ def test_risk_based_sizing_math() -> None:
 
 def test_cash_constraint_binds() -> None:
     result = size_position(_evidence(), _portfolio(settled_cash=10_000.0), SizingPolicy())
-    # cash after reserve: 10000 - 5000 = 5000 -> floor(5000/100) = 50
-    assert result.quantity == 50
+    # cash after reserve and entry commission: 10000 - 5000 - 1 = 4999 -> 49 shares
+    assert result.quantity == 49
     assert result.binding_constraint == "settled_cash"
+
+
+def test_sizing_cash_clamp_charges_commission() -> None:
+    # Without commission the exact $5000 of free cash would buy 50 shares and
+    # the 1.00 commission would overdraw settled cash.
+    zero = size_position(_evidence(), _portfolio(settled_cash=10_000.0), SizingPolicy(commission_per_order=0.0))
+    charged = size_position(_evidence(), _portfolio(settled_cash=10_000.0), SizingPolicy())
+    assert zero.quantity == 50
+    assert charged.quantity == 49
 
 
 def test_max_positions_rejects() -> None:

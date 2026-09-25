@@ -354,8 +354,9 @@ def make_spec(name: str, params: Mapping[str, Any] | None = None) -> FeatureSpec
     _, defaults, lookback, columns = entry
     merged = {**defaults, **dict(params or {})}
     for k, v in merged.items():
-        if "window" in k or k in ("rank_window",):
-            _window(int(v), k)
+        if k == "window" or k.endswith("_window"):
+            if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+                raise FeatureError(f"{k} must be a positive integer, got {v!r}")
     # Lookback grows with any window/rank_window override, plus one bar for
     # features that shift or diff.
     _SHIFTED = {
