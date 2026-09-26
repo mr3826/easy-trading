@@ -6,12 +6,19 @@ __pycache__/
 *.egg-info/
 *.egg/
 .env
+.env.local
 *.env.local
 *.env.*.local
-.env.example
 venv/
 env/
 .venv/
+
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
 
 # IDE
 .vscode/
@@ -21,3 +28,9 @@ env/
 *~
 
 # Project specific
+# Generated research artifacts (preflight reports, family reports, MVP
+# summaries, promotion decision artifacts) live in artifacts/ and are
+# deliberately NOT committed; CI evidence under artifacts/verification/ is
+# the tracked exception.
+artifacts/*
+!artifacts/verification/

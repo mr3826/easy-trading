@@ -20,6 +20,16 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
         f"- family_id: `{report['family_id']}`",
         f"- source_commit: `{report['source_commit']}`",
         f"- dataset_hash: `{report['dataset_hash']}`",
+        *([f"- dataset_fingerprint: `{report['dataset_fingerprint']}`"] if report.get("dataset_fingerprint") else []),
+        *(
+            [
+                f"- run_id: `{report['run_id']}`",
+                f"- data_preflight_verdict: {report.get('data_preflight_verdict', 'n/a')}"
+                f" (accepted warnings: {len(report.get('accepted_warnings', []))})",
+            ]
+            if report.get("run_id")
+            else []
+        ),
         f"- universe: {', '.join(report['universe'])}",
         f"- observations: {report['n_observations']}",
         f"- folds: {len(report['folds'])} (embargo={report['embargo']}, anchored={report['anchored']})",

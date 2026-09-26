@@ -169,6 +169,24 @@ def build_membership_manifest_from_csv(csv_path: Path, *, source: str = "") -> D
         return build_membership_manifest_from_rows(list(normalized), source=source or csv_path.name)
 
 
+def write_membership_manifest_file(csv_path: Path, output_path: Path, *, source: str = "") -> Dict[str, int]:
+    """Build a manifest from a vendor CSV, persist it, and round-trip validate.
+
+    Returns summary stats; ``exits == 0`` means the vendor export is
+    current-constituents-only and the preflight will fail it.
+    """
+    manifest = build_membership_manifest_from_csv(csv_path, source=source)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # Round-trip: what we wrote must load through the exact preflight loader.
+    membership = load_membership_manifest(output_path)
+    return {
+        "symbols": len(membership),
+        "entries": len(manifest["entries"]),
+        "exits": sum(1 for ranges in membership.values() for _, end in ranges if end is not None),
+    }
+
+
 def membership_on(membership: Membership, day: date) -> Set[str]:
     """Symbols whose membership ranges include ``day`` (inclusive)."""
     return {
@@ -370,6 +388,30 @@ def run_data_preflight(
                 )
 
     return _finalize(checks, bars, benchmark, membership)
+
+
+def run_preflight_for_paths(data_dir: Path, benchmark: str, membership_path: Path) -> Dict[str, Any]:
+    """File-level preflight: load manifest + bars from disk and run the gate.
+
+    Single implementation shared by ``trading-platform data preflight``, the
+    canonical MVP workflow, and legacy scripts. Raises
+    :class:`MembershipManifestError` for an invalid manifest and
+    :class:`FileNotFoundError` with an actionable message when required inputs
+    are missing (the caller maps these to the external-setup exit code).
+    """
+    if not membership_path.exists():
+        raise FileNotFoundError(f"membership manifest not found: {membership_path}")
+    membership = load_membership_manifest(membership_path)
+    from trading_platform.research.mvp import load_bar_frames
+
+    symbols = sorted({*membership, benchmark})
+    bars = load_bar_frames(data_dir, symbols)
+    bench = bars.pop(benchmark, None)
+    if bench is None:
+        raise FileNotFoundError(f"benchmark data not found: {data_dir / (benchmark + '.parquet')}")
+    if not bars:
+        raise FileNotFoundError(f"no universe bar data found in {data_dir}")
+    return run_data_preflight(bars, bench, membership)
 
 
 def _finalize(

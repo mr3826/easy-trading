@@ -60,6 +60,13 @@ class ExternalSetupRequired(RuntimeError):
     """Raised when required external inputs (market data) are absent."""
 
 
+def strip_pit_metadata(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop point-in-time availability metadata consumed by the gate, not the
+    backtester. ``available_at`` is validated by ``data_quality`` but must not
+    reach feature/signal code, which treats every column as a numeric factor."""
+    return df.drop(columns=[c for c in df.columns if c == "available_at"])
+
+
 def _git_commit() -> str:
     try:
         out = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
@@ -94,8 +101,8 @@ def build_feature_frames(
     specs = sorted(spec_keys.values(), key=lambda s: s.fingerprint())
     out: Dict[str, pd.DataFrame] = {}
     for symbol, ohlc in ohlc_by_symbol.items():
-        ff = compute_features(ohlc, specs, symbol=symbol, benchmark=benchmark_close)
-        frame = ohlc.join(ff.frame)
+        ff = compute_features(strip_pit_metadata(ohlc), specs, symbol=symbol, benchmark=benchmark_close)
+        frame = strip_pit_metadata(ohlc).join(ff.frame)
         out[symbol] = frame
     return out
 
@@ -117,6 +124,8 @@ def run_family_research(
     promotions_root: Optional[Path] = None,
     universe_is_point_in_time: bool = False,
     universe_membership: Optional[Mapping[Any, Sequence[str]]] = None,
+    run_metadata: Optional[Mapping[str, Any]] = None,
+    extra_known_biases: Sequence[str] = (),
 ) -> Dict[str, Any]:
     """Full reverification for one strategy family. Returns the report dict."""
     if family_name not in STRATEGY_FAMILIES or STRATEGY_FAMILIES[family_name][1] is None:
@@ -124,6 +133,7 @@ def run_family_research(
     if not ohlc_by_symbol:
         raise ExternalSetupRequired("no universe data supplied (REQUIRES_EXTERNAL_SETUP)")
     params_cls, signal_fn = STRATEGY_FAMILIES[family_name]
+    benchmark = strip_pit_metadata(benchmark)
     cfg = backtest_config or BacktestConfig()
     engine = RegimeEngine()
 
@@ -300,17 +310,22 @@ def run_family_research(
                 r["config_id"] for r in per_config_reports if r.get("promotion", {}).get("status") == "REJECTED"
             ],
         },
-        "known_biases": []
-        if pit_universe
-        else [
-            "survivorship/universe bias: universe is not point-in-time constituent membership",
-            "daily bars only: intraday fills modeled, not observed",
-            "costs modeled (fixed commission + slippage); spreads approximated, not observed",
-        ],
+        "known_biases": (
+            []
+            if pit_universe
+            else [
+                "survivorship/universe bias: universe is not point-in-time constituent membership",
+                "daily bars only: intraday fills modeled, not observed",
+                "costs modeled (fixed commission + slippage); spreads approximated, not observed",
+            ]
+        )
+        + list(extra_known_biases),
         "evidence_ceiling": ("FULL_OOS_CAPABLE" if pit_universe else "CAPPED: universe bias present"),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "version": RESEARCH_RUNNER_VERSION,
     }
+    if run_metadata:
+        summary.update(run_metadata)
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
