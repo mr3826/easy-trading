@@ -219,10 +219,13 @@ class TestHappyPath:
         for fam in summary["families"]:
             if fam["verdict"] == "REJECTED":
                 assert fam["rejection_reasons"], "rejections must always name reasons"
+            tpy = fam.get("trade_activity_proxy_trades_per_year")
+            assert tpy is None or tpy >= 0
             # family reports must be traceable to the run identity
             report = json.loads(list(clean_session.run_dir.glob(f"{fam['family']}--*.json"))[0].read_text("utf-8"))
             assert report["dataset_fingerprint"] == summary["dataset_fingerprint"]
             assert report["run_id"] == summary["run_id"]
+        assert "turnover" in summary["metric_notes"]  # proxy honestly labelled, not fabricated
 
     def test_reports_and_status_commands(self, clean_session: _Session, capsys, monkeypatch) -> None:
         summary = clean_session.summary

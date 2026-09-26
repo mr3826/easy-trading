@@ -319,6 +319,12 @@ def run_mvp_research(
             continue
         verdict = family_verdict(report)
         best = _best_config(report)
+        # Turnover is not instrumented by the vector backtester; report an
+        # explicit, clearly-labelled trade-activity proxy (trades per OOS year)
+        # rather than a fabricated turnover figure.
+        oos_days = sum(int(f.get("test_end", 0)) - int(f.get("test_start", 0)) for f in report.get("folds", []))
+        best_metrics = (best or {}).get("metrics", {}) if best else {}
+        trades_per_year = float(best_metrics.get("trade_count", 0)) / (oos_days / 252.0) if oos_days > 0 else None
         family_results.append(
             {
                 "family": family,
@@ -326,6 +332,7 @@ def run_mvp_research(
                 "trial_count": report["trial_count"],
                 "best_config_id": best.get("config_id") if best else None,
                 "metrics": best.get("metrics", {}) if best else {},
+                "trade_activity_proxy_trades_per_year": trades_per_year,
                 "significance": best.get("significance", {}) if best else {},
                 "pbo": best.get("pbo", {}) if best else {},
                 "walk_forward": best.get("walk_forward_consistency", {}) if best else {},
@@ -388,6 +395,10 @@ def run_mvp_research(
         },
         "walk_forward": {"n_folds": n_folds, "min_train": min_train, "embargo": embargo, "anchored": True},
         "families_requested": list(selected),
+        "metric_notes": {
+            "turnover": "not instrumented by the vector backtester; per-family "
+            "trade_activity_proxy_trades_per_year is a trade-activity proxy, NOT dollar turnover"
+        },
         "families": family_results,
         "promoted": [f["family"] for f in approved],
         "final_verdict": (
@@ -553,9 +564,9 @@ def render_mvp_summary(summary: Mapping[str, Any]) -> str:
         "",
         f"**{summary['final_verdict']}**",
         "",
-        "| family | verdict | trials | trades | expectancy | sharpe | sortino | maxDD | PF | PSR | DSR | PBO |"
-        " wf+ folds | 2x cost | bench excess | top1 sym |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| family | verdict | trials | trades | trades/yr† | expectancy | sharpe | sortino | maxDD | PF | PSR"
+        " | DSR | PBO | wf+ folds | 2x cost | bench excess | top1 sym |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for fam in summary["families"]:
         m = fam.get("metrics", {}) or {}
@@ -565,13 +576,15 @@ def render_mvp_summary(summary: Mapping[str, Any]) -> str:
         cs = fam.get("cost_stress", {}) or {}
         bench = fam.get("benchmark", {}) or {}
         conc = (fam.get("concentration", {}) or {}).get("symbols") or {}
+        tpy = fam.get("trade_activity_proxy_trades_per_year")
         lines.append(
-            "| {fam} | {verdict} | {trials} | {trades} | {exp} | {sharpe} | {sortino} | {mdd} | {pf} | {psr}"
-            " | {dsr} | {pbo} | {wff} | {cs} | {be} | {top1} |".format(
+            "| {fam} | {verdict} | {trials} | {trades} | {tpy} | {exp} | {sharpe} | {sortino} | {mdd} | {pf}"
+            " | {psr} | {dsr} | {pbo} | {wff} | {cs} | {be} | {top1} |".format(
                 fam=fam["family"],
                 verdict=fam.get("verdict", "?"),
                 trials=fam.get("trial_count", "?"),
                 trades=int(m.get("trade_count", 0)),
+                tpy=_f(tpy, 1) if tpy is not None else "n/a",
                 exp=_f(m.get("expectancy", 0.0), 2),
                 sharpe=_f(m.get("sharpe", 0.0)),
                 sortino=_f(m.get("sortino", 0.0)),
@@ -586,6 +599,8 @@ def render_mvp_summary(summary: Mapping[str, Any]) -> str:
                 top1=_f(conc.get("top1_share", 0.0), 2),
             )
         )
+    lines.append("")
+    lines.append("† trades/yr is a trade-activity proxy; the vector backtester does not measure dollar turnover.")
     lines.append("")
     lines.append("## Parameter stability / white reality check")
     lines.append("")
