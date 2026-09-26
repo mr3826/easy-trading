@@ -258,6 +258,11 @@ class TestHappyPath:
         monkeypatch.setenv("TRADING_DATA_DIR", str(clean_session.data))
         monkeypatch.setenv("TRADING_MEMBERSHIP", str(clean_session.manifest))
         monkeypatch.setenv("TRADING_RESEARCH_OUTPUT", str(clean_session.output))
+        # This test proves the DATA path; DB/migration behavior is covered by
+        # test_cli_safety (fail-closed) and the postgres suite. CI provisions
+        # an empty DATABASE_URL whose migrations may not yet be applied at
+        # this point in the run, so keep this assertion DB-independent.
+        monkeypatch.delenv("DATABASE_URL", raising=False)
         report = run_doctor()
         assert report.exit_code == 0, report.render()
         levels = {c.name: c.level for c in report.checks}

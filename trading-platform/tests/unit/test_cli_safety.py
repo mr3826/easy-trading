@@ -59,6 +59,7 @@ def test_doctor_output_never_leaks_secret_like_env(tmp_path: Path, monkeypatch) 
 
 
 def test_doctor_reports_blocked_without_data_exit_nonzero(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("TRADING_DATA_DIR", raising=False)
     monkeypatch.delenv("TRADING_MEMBERSHIP", raising=False)
     monkeypatch.setenv("TRADING_RESEARCH_OUTPUT", str(tmp_path / "out"))
@@ -71,6 +72,7 @@ def test_doctor_reports_blocked_without_data_exit_nonzero(tmp_path: Path, monkey
 
 
 def test_doctor_fails_on_invalid_membership_manifest(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     data = tmp_path / "bars"
     data.mkdir()
     bad = tmp_path / "m.json"
