@@ -1,12 +1,11 @@
-"""Run strategy-family reverification research and write versioned reports.
+"""Run one strategy family's reverification research (exploratory, non-PIT).
 
-Usage:
-    uv run python scripts/run_strategy_research.py \
-        --family trend_relative_strength \
-        --data-dir /path/to/daily-bars \
-        --benchmark SPY \
-        --symbols AAPL MSFT ... \
-        --output-dir artifacts/research
+Backward-compatible wrapper: parameter grids and the family runner now live in
+``trading_platform.research.mvp`` (shared with ``trading-platform research``).
+For the canonical gated workflow with a point-in-time membership manifest use:
+
+    trading-platform research run-all --data-dir ... --benchmark SPY \
+        --membership universe_membership.json --output-dir artifacts/research
 
 Exits non-zero with REQUIRES_EXTERNAL_SETUP when data is absent. Never
 touches broker or live-trading paths: this is a read-only research tool.
@@ -18,12 +17,12 @@ import argparse
 import sys
 from pathlib import Path
 
+FAMILIES = ["trend_relative_strength", "breakout_volume", "trend_pullback"]
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--family", required=True, choices=["trend_relative_strength", "breakout_volume", "trend_pullback"]
-    )
+    parser.add_argument("--family", required=True, choices=FAMILIES)
     parser.add_argument("--data-dir", required=True, type=Path)
     parser.add_argument("--benchmark", default="SPY")
     parser.add_argument("--symbols", nargs="+", required=True)
@@ -33,49 +32,26 @@ def main() -> int:
     parser.add_argument("--embargo", type=int, default=30)
     args = parser.parse_args()
 
-    from trading_platform.research.runner import ExternalSetupRequired, load_parquet_universe, run_family_research
+    from trading_platform.research.mvp import run_single_family_research
+    from trading_platform.research.runner import ExternalSetupRequired
     from trading_platform.validation import BootstrapConfig
 
     try:
-        frames = load_parquet_universe(args.data_dir, [*args.symbols, args.benchmark])
+        report = run_single_family_research(
+            family=args.family,
+            data_dir=args.data_dir,
+            benchmark=args.benchmark,
+            symbols=args.symbols,
+            output_dir=args.output_dir,
+            n_folds=args.n_folds,
+            min_train=args.min_train,
+            embargo=args.embargo,
+            bootstrap=BootstrapConfig(n_resamples=1000, block_length=10, seed=42),
+        )
     except ExternalSetupRequired as exc:
         print(f"ERROR: {exc}")
         print("status=REQUIRES_EXTERNAL_SETUP")
         return 2
-    benchmark = frames.pop(args.benchmark)
-
-    grids = {
-        "trend_relative_strength": [
-            {"momentum_window": 63, "rs_window": 63},
-            {"momentum_window": 126, "rs_window": 126},
-            {"momentum_window": 63, "rs_window": 126},
-            {"momentum_window": 126, "rs_window": 63},
-        ],
-        "breakout_volume": [
-            {"breakout_window": 20, "min_relative_volume": 1.5},
-            {"breakout_window": 55, "min_relative_volume": 1.5},
-            {"breakout_window": 20, "min_relative_volume": 2.0},
-            {"breakout_window": 55, "min_relative_volume": 2.0},
-        ],
-        "trend_pullback": [
-            {"rsi_window": 3, "rsi_oversold": 20.0},
-            {"rsi_window": 3, "rsi_oversold": 30.0},
-            {"rsi_window": 5, "rsi_oversold": 20.0},
-            {"rsi_window": 5, "rsi_oversold": 30.0},
-        ],
-    }
-    report = run_family_research(
-        args.family,
-        frames,
-        benchmark,
-        param_grid=grids[args.family],
-        n_folds=args.n_folds,
-        min_train=args.min_train,
-        embargo=args.embargo,
-        bootstrap=BootstrapConfig(n_resamples=1000, block_length=10, seed=42),
-        output_dir=args.output_dir,
-        promotions_root=args.output_dir / "promotions",
-    )
     approved = report["promotion_summary"]["approved"]
     print(f"family={report['family_name']} trials={report['trial_count']}")
     print(f"approved={approved or 'NONE'}")

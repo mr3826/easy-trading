@@ -9,6 +9,22 @@
 | `TRADING_ENV` | `research`, `simulation`, `shadow`, or `paper` for ordinary work | Selects a non-live environment |
 | `DATABASE_URL` | isolated test PostgreSQL URL for integration tests | Durable state service |
 
+## MVP research workflow variables (see docs/MVP1.md and `.env.example`)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TRADING_DATA_DIR` | unset (operator path) | Daily-bar Parquet directory consumed by `data preflight` / `research run-all` / `doctor` |
+| `TRADING_MEMBERSHIP` | unset (operator path) | PIT membership manifest produced by `data build-membership` |
+| `TRADING_BENCHMARK` | `SPY` | Benchmark symbol for preflight/research |
+| `TRADING_RESEARCH_OUTPUT` | `artifacts/research` | Root for dataset manifests, family reports, MVP summaries |
+| `TRADING_PROMOTIONS_ROOT` | `artifacts/promotions` | Immutable promotion decision artifacts |
+| `TRADING_EXPERIMENTS_ROOT` | system temp | Phase-4 experiment registry root |
+| `TRADING_JOURNAL_PATH` | `artifacts/journal` | Decision journal location probe (doctor) |
+
+No credentials belong in these files. `trading-platform doctor` reports
+configuration validity without echoing secret values, and unsafe safety
+variables are force-rejected by policy rather than trusted.
+
 Credentials are deployment secrets, not source-controlled configuration.
 
 ## Environment Separation

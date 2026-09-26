@@ -29,8 +29,10 @@ import pandas as pd
 
 from trading_platform.features.indicators import compute_features
 from trading_platform.promotion import (
+    STATUS_APPROVED,
     PromotionPolicy,
     evaluate_promotion,
+    mark_research_only,
     persist_decision,
 )
 from trading_platform.regimes import RegimeEngine
@@ -58,6 +60,13 @@ RESEARCH_RUNNER_VERSION = "1.0.0"
 
 class ExternalSetupRequired(RuntimeError):
     """Raised when required external inputs (market data) are absent."""
+
+
+def strip_pit_metadata(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop point-in-time availability metadata consumed by the gate, not the
+    backtester. ``available_at`` is validated by ``data_quality`` but must not
+    reach feature/signal code, which treats every column as a numeric factor."""
+    return df.drop(columns=[c for c in df.columns if c == "available_at"])
 
 
 def _git_commit() -> str:
@@ -94,8 +103,9 @@ def build_feature_frames(
     specs = sorted(spec_keys.values(), key=lambda s: s.fingerprint())
     out: Dict[str, pd.DataFrame] = {}
     for symbol, ohlc in ohlc_by_symbol.items():
-        ff = compute_features(ohlc, specs, symbol=symbol, benchmark=benchmark_close)
-        frame = ohlc.join(ff.frame)
+        clean = strip_pit_metadata(ohlc)
+        ff = compute_features(clean, specs, symbol=symbol, benchmark=benchmark_close)
+        frame = clean.join(ff.frame)
         out[symbol] = frame
     return out
 
@@ -117,6 +127,8 @@ def run_family_research(
     promotions_root: Optional[Path] = None,
     universe_is_point_in_time: bool = False,
     universe_membership: Optional[Mapping[Any, Sequence[str]]] = None,
+    run_metadata: Optional[Mapping[str, Any]] = None,
+    extra_known_biases: Sequence[str] = (),
 ) -> Dict[str, Any]:
     """Full reverification for one strategy family. Returns the report dict."""
     if family_name not in STRATEGY_FAMILIES or STRATEGY_FAMILIES[family_name][1] is None:
@@ -124,6 +136,7 @@ def run_family_research(
     if not ohlc_by_symbol:
         raise ExternalSetupRequired("no universe data supplied (REQUIRES_EXTERNAL_SETUP)")
     params_cls, signal_fn = STRATEGY_FAMILIES[family_name]
+    benchmark = strip_pit_metadata(benchmark)
     cfg = backtest_config or BacktestConfig()
     engine = RegimeEngine()
 
@@ -256,6 +269,11 @@ def run_family_research(
         bootstrap=bootstrap,
     )
 
+    # Universe point-in-time status governs whether an APPROVED artifact may be
+    # minted at all: survivorship-biased (non-PIT) evidence can never create
+    # paper eligibility downstream. Computed before the decision loop.
+    pit_universe = universe_is_point_in_time or universe_membership is not None
+
     for i, result in enumerate(config_results):
         report = validate_configuration(
             result,
@@ -267,6 +285,13 @@ def run_family_research(
         if len(param_objects) < 2:
             policy = PromotionPolicy(**{**vars(policy), "require_parameter_stability": False})
         decision = evaluate_promotion(family_name, report, policy, family_diagnostics=family_diag)
+        if decision.status == STATUS_APPROVED and not pit_universe:
+            decision = mark_research_only(
+                family_name,
+                report,
+                "non-PIT universe: survivorship-biased evidence cannot mint paper eligibility "
+                "(promotion downgraded to RESEARCH_ONLY)",
+            )
         decision_dict = decision.to_dict()
         report["promotion"] = decision_dict
         per_config_reports.append(report)
@@ -277,7 +302,6 @@ def run_family_research(
         key=lambda r: r.get("metrics", {}).get("sharpe", float("-inf")),
         default=None,
     )
-    pit_universe = universe_is_point_in_time or universe_membership is not None
     summary = {
         "family_id": family_id,
         "family_name": family_name,
@@ -300,17 +324,22 @@ def run_family_research(
                 r["config_id"] for r in per_config_reports if r.get("promotion", {}).get("status") == "REJECTED"
             ],
         },
-        "known_biases": []
-        if pit_universe
-        else [
-            "survivorship/universe bias: universe is not point-in-time constituent membership",
-            "daily bars only: intraday fills modeled, not observed",
-            "costs modeled (fixed commission + slippage); spreads approximated, not observed",
-        ],
+        "known_biases": (
+            []
+            if pit_universe
+            else [
+                "survivorship/universe bias: universe is not point-in-time constituent membership",
+                "daily bars only: intraday fills modeled, not observed",
+                "costs modeled (fixed commission + slippage); spreads approximated, not observed",
+            ]
+        )
+        + list(extra_known_biases),
         "evidence_ceiling": ("FULL_OOS_CAPABLE" if pit_universe else "CAPPED: universe bias present"),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "version": RESEARCH_RUNNER_VERSION,
     }
+    if run_metadata:
+        summary.update(run_metadata)
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

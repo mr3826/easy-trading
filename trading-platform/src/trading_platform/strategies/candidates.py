@@ -324,10 +324,13 @@ def trend_pullback_signal(
     above the recovery threshold (stabilization/recovery trigger).
     """
     p = params
-    if len(features) < 2:
-        raise ValueError("pullback signal requires at least 2 bars")
+    if len(features) == 0:
+        raise ValueError("pullback signal requires at least one bar")
     row = features.iloc[-1]
-    prev = features.iloc[-2]
+    # The first decision day may legitimately have a single bar: the prior-bar
+    # RSI comparison is impossible then, so the signal FAILS its conditions
+    # (rejected HOLD below) instead of crashing the caller's backtest.
+    prev = features.iloc[-2] if len(features) >= 2 else row
     rejections: List[str] = []
     regime_map: Mapping[str, Any] = regime.to_dict() if regime else {}
 

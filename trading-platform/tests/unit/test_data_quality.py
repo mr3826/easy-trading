@@ -239,3 +239,22 @@ def test_report_is_deterministic_and_json_safe() -> None:
     bars2["AAA"] = future
     rep2 = run_data_preflight(bars2, benchmark, membership)
     assert rep2["status"] == STATUS_FAIL  # calendar:AAA
+
+
+def test_membership_symbols_are_path_safe() -> None:
+    """Symbols flow into filesystem paths; traversal/delimiter payloads must fail closed."""
+    for evil in ("../evil", "a/b", "..\\evil", "SYMBOL;rm -rf", "", " ", ".HIDDEN", "TOO_LONG_SYMBOL_NAME_X"):
+        with pytest.raises(MembershipManifestError, match="invalid symbol|missing symbol"):
+            build_membership_manifest_from_rows([{"symbol": evil, "start": "2022-01-03", "end": None}])
+    # valid shapes still pass (incl. BRK.B style tickers); rows are upper-cased
+    ok = build_membership_manifest_from_rows(
+        [{"symbol": "brk.b", "start": "2022-01-03", "end": None}, {"symbol": "A", "start": "2022-01-03"}]
+    )
+    assert {e["symbol"] for e in ok["entries"]} == {"BRK.B", "A"}
+
+
+def test_load_membership_manifest_rejects_traversal_symbols(tmp_path: Path) -> None:
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps([{"symbol": "../outside", "start": "2022-01-03"}]), encoding="utf-8")
+    with pytest.raises(MembershipManifestError, match="invalid symbol"):
+        load_membership_manifest(path)

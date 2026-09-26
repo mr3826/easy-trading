@@ -34,3 +34,17 @@ Data-quality gate (2026-09-26): `research/data_quality.py` + `scripts/run_data_p
 refuse non-PIT datasets (missing/invalid constituent membership manifest, survivorship
 red flags, bar integrity) **before** any strategy research. See
 [DATA_PIPELINE.md](DATA_PIPELINE.md).
+
+MVP-1 product surface (2026-09-26): the fragmented operator scripts are unified
+under the canonical `trading-platform` CLI (`status`, `doctor`, `data`,
+`research`, `report`) with a fail-closed data gate, explicit warning
+acknowledgement, dataset fingerprinting, `research run-all` across registered
+families, cross-family `MVP_RESEARCH_SUMMARY` artifacts, and a deterministic
+product state model. Legacy scripts remain as thin wrappers. NOTE for tooling:
+`run_strategy_research.py` (exploratory, non-PIT) now reports `approved=NONE`
+for configurations that the promotion gate would previously have approved —
+non-PIT evidence can no longer mint paper-eligible APPROVED artifacts (intentional
+safety hardening, covered by regression tests). See
+[MVP1.md](MVP1.md) and [MVP1_READINESS.md](../MVP1_READINESS.md). Still: no
+strategy promoted, research evidence requires licensed external data, live
+NOT AUTHORIZED.

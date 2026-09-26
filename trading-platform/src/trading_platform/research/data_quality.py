@@ -25,6 +25,7 @@ WARNING (pass, recorded):
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -51,6 +52,37 @@ Membership = Dict[str, List[Tuple[date, Optional[date]]]]
 
 class MembershipManifestError(ValueError):
     """Malformed membership manifest."""
+
+
+# Vendor-supplied symbol strings are interpolated into filesystem paths by the
+# research loaders; without this shape check a manifest symbol like
+# "../../elsewhere/target" would read/hashes files outside --data-dir.
+TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,11}$")
+
+
+def validate_symbol(symbol: str) -> str:
+    """Canonicalize a symbol or raise; guards manifest/CLI strings before path use."""
+    cleaned = str(symbol).strip().upper()
+    if not TICKER_RE.fullmatch(cleaned):
+        raise MembershipManifestError(
+            f"invalid symbol {symbol!r}: expected a US-equity ticker (letters, digits, dot, dash; 1-12 chars)"
+        )
+    return cleaned
+
+
+def load_bar_frames(data_dir: Path, symbols: Sequence[str]) -> Dict[str, pd.DataFrame]:
+    """Load the bar frames that actually exist in ``data_dir`` for ``symbols``.
+
+    Single implementation shared by preflight, run-all, and dataset identity.
+    Symbols are validated to ticker shape first (path-traversal guard).
+    """
+    frames: Dict[str, pd.DataFrame] = {}
+    for symbol in symbols:
+        clean = validate_symbol(symbol)
+        path = data_dir / f"{clean}.parquet"
+        if path.exists():
+            frames[clean] = pd.read_parquet(path)
+    return frames
 
 
 @dataclass(frozen=True)
@@ -80,7 +112,7 @@ def _validate_entries(entries: List[Any]) -> Membership:
         symbol = item.get("symbol")
         if not isinstance(symbol, str) or not symbol.strip():
             raise MembershipManifestError(f"entry {i}: invalid symbol")
-        symbol = symbol.strip().upper()
+        symbol = validate_symbol(symbol)
         try:
             start = _to_date(item["start"])
         except (KeyError, ValueError) as exc:
@@ -167,6 +199,36 @@ def build_membership_manifest_from_csv(csv_path: Path, *, source: str = "") -> D
             raise MembershipManifestError("CSV must have a 'symbol' header column")
         normalized = ({str(k).strip().lower(): v for k, v in row.items() if k is not None} for row in reader)
         return build_membership_manifest_from_rows(list(normalized), source=source or csv_path.name)
+
+
+def write_membership_manifest_file(csv_path: Path, output_path: Path, *, source: str = "") -> Dict[str, int]:
+    """Build a manifest from a vendor CSV, persist it, and round-trip validate.
+
+    Returns summary stats; ``exits == 0`` means the vendor export is
+    current-constituents-only and the preflight will fail it.
+    """
+    manifest = build_membership_manifest_from_csv(csv_path, source=source)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # Round-trip: what we wrote must load through the exact preflight loader.
+    membership = load_membership_manifest(output_path)
+    return {
+        "symbols": len(membership),
+        "entries": len(manifest["entries"]),
+        "exits": sum(1 for ranges in membership.values() for _, end in ranges if end is not None),
+    }
+
+
+def format_membership_build_result(stats: Mapping[str, int], output_path: Path) -> List[str]:
+    """Shared operator-facing report lines for a membership build (CLI + scripts)."""
+    lines = [f"OK symbols={stats['symbols']} entries={stats['entries']} exits={stats['exits']} -> {output_path}"]
+    if stats["exits"] == 0:
+        lines.append(
+            "WARNING: manifest has zero membership exits — the preflight will fail it as "
+            "survivor-only data. This usually means the vendor export only contains "
+            "current constituents; obtain full historical membership including removals."
+        )
+    return lines
 
 
 def membership_on(membership: Membership, day: date) -> Set[str]:
@@ -370,6 +432,33 @@ def run_data_preflight(
                 )
 
     return _finalize(checks, bars, benchmark, membership)
+
+
+def run_preflight_for_paths(
+    data_dir: Path, benchmark: str, membership_path: Path
+) -> Tuple[Dict[str, Any], Dict[str, pd.DataFrame], pd.DataFrame, Membership]:
+    """File-level preflight: load manifest + bars from disk and run the gate.
+
+    Single implementation shared by ``trading-platform data preflight``, the
+    canonical MVP workflow, and legacy scripts; returns
+    ``(report, bars, benchmark_frame, membership)`` so the caller can reuse
+    exactly what the gate judged (dataset identity, research inputs). Raises
+    :class:`MembershipManifestError` for an invalid manifest and
+    :class:`FileNotFoundError` with an actionable message when required inputs
+    are missing (the caller maps these to the external-setup exit code).
+    """
+    if not membership_path.exists():
+        raise FileNotFoundError(f"membership manifest not found: {membership_path}")
+    membership = load_membership_manifest(membership_path)
+    bench = validate_symbol(benchmark)
+    symbols = sorted({*membership, bench})
+    bars = load_bar_frames(data_dir, symbols)
+    benchmark_frame = bars.pop(bench, None)
+    if benchmark_frame is None:
+        raise FileNotFoundError(f"benchmark data not found: {data_dir / (bench + '.parquet')}")
+    if not bars:
+        raise FileNotFoundError(f"no universe bar data found in {data_dir}")
+    return run_data_preflight(bars, benchmark_frame, membership), bars, benchmark_frame, membership
 
 
 def _finalize(
