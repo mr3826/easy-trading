@@ -83,6 +83,18 @@ def test_doctor_fails_on_invalid_membership_manifest(tmp_path: Path, monkeypatch
     assert any(c.level == "FAIL" and c.name == "research data" for c in report.checks)
 
 
+def test_doctor_fails_when_configured_database_unreachable(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nobody@127.0.0.1:1/none")
+    monkeypatch.delenv("TRADING_DATA_DIR", raising=False)
+    monkeypatch.delenv("TRADING_MEMBERSHIP", raising=False)
+    monkeypatch.setenv("TRADING_RESEARCH_OUTPUT", str(tmp_path / "out"))
+    report = run_doctor()
+    assert report.exit_code == 1  # a configured DB that is down is a hard failure
+    levels = {c.name: c.level for c in report.checks}
+    assert levels["database"] == "FAIL"
+    assert levels["migrations"] == "FAIL"
+
+
 def test_cli_imports_no_execution_or_broker_modules() -> None:
     """Security boundary: importing the CLI must not drag in broker/OMS/risk.
 

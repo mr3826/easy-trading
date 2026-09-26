@@ -214,6 +214,11 @@ def add_subparser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     run.add_argument("--membership", default=None, type=Path)
     run.add_argument("--symbols", nargs="*", default=[])
     run.add_argument("--allow-non-pit", action="store_true")
+    run.add_argument(
+        "--accept-data-warnings",
+        action="store_true",
+        help="explicitly acknowledge PASS_WITH_WARNINGS from the data gate (gated mode)",
+    )
     run.add_argument("--output-dir", default=research_output_root(), type=Path)
     _common_research_args(run)
     run.set_defaults(func=cmd_run)

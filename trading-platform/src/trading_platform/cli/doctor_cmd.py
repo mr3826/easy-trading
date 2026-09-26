@@ -80,7 +80,7 @@ def _probe_database(dsn: str) -> Tuple[bool, Optional[List[str]], str]:
     migrations = _migrations_dir()
     if migrations is None:
         return True, None, "connected; migrations directory not found in this installation"
-    expected = sorted(p.stem for p in migrations.glob("*.sql"))
+    expected = sorted(p.name for p in migrations.glob("*.sql"))
     missing = [e for e in expected if e not in applied]
     detail = f"connected; {len(applied)}/{len(expected)} migrations applied"
     return True, missing, detail

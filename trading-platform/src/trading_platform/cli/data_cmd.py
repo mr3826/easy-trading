@@ -44,7 +44,8 @@ def cmd_build_membership(args: argparse.Namespace) -> int:
 def cmd_preflight(args: argparse.Namespace) -> int:
     try:
         report = run_preflight_for_paths(args.data_dir, args.benchmark, args.membership)
-    except MembershipManifestError as exc:
+    except ValueError as exc:
+        # MembershipManifestError and JSON decode errors (both ValueError).
         print(f"ERROR: invalid membership manifest: {exc}")
         return EXIT_DATA_FAILED
     except (FileNotFoundError, OSError) as exc:
