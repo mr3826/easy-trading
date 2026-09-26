@@ -2,6 +2,10 @@
 
 Canonical flow for every hypothesis (see also `research-methodology.md`):
 
+0. **Gate the data**: run `scripts/run_data_preflight.py` (see
+   [DATA_PIPELINE.md](DATA_PIPELINE.md)). Data quality first: a FAIL/missing membership
+   manifest means no strategy conclusion from that universe is trustworthy, whatever it
+   prints.
 1. **Register** an explicit hypothesis with fixed upfront parameters and a registered ID
    ([STRATEGY_CATALOG.md](STRATEGY_CATALOG.md)). No iterative tuning against results.
 2. **Compute** point-in-time features and regimes; verify no-lookahead via prefix-stability tests.

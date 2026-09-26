@@ -104,3 +104,13 @@ universe ingestion remains operator work; the pipeline accepts Parquet today.
    deletion mid-cycle).
 7. **Runner silently wrote promotion artifacts to CWD** — explicit `promotions_root`
    parameter now threaded through (tests use tmp paths).
+
+## Follow-up (2026-09-26): dataset point-in-time preflight gate
+
+The next milestone is data quality before strategy performance. Delivered code-verifiable
+preparation: `research/data_quality.py` + `scripts/run_data_preflight.py` — a fail-closed
+gate that refuses datasets without a point-in-time constituent membership manifest, and
+flags survivorship contamination (no exits, static membership, adds-only growth) plus bar
+integrity failures. `run_family_research` accepts the same manifest
+(`universe_membership=`) to lift the survivorship evidence ceiling legitimately.
+Still REQUIRES_EXTERNAL_SETUP: the real bars + the real historical membership feed itself.
