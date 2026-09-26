@@ -19,6 +19,7 @@ from trading_platform.cli._common import (
     research_output_root,
 )
 from trading_platform.research.mvp import (
+    FINAL_INCOMPLETE,
     MVP_RESEARCH_VERSION,
     PARAM_GRIDS,
     SUMMARY_JSON,
@@ -77,6 +78,11 @@ def _run_gated(args: argparse.Namespace, families: Optional[List[str]]) -> int:
     print(f"run_id={summary['run_id']} dataset_fingerprint={summary['dataset_fingerprint'][:12]}")
     print(f"summary={summary['run_dir']}/{SUMMARY_JSON}")
     print(f"next: {summary['next_action']}")
+    # A crashed family means the gate never judged part of the trial space —
+    # that is an incomplete run (exit 1), not a clean NO_STRATEGY_PROMOTED (0).
+    if summary["final_verdict"] == FINAL_INCOMPLETE:
+        print("RESEARCH_INCOMPLETE: one or more families errored; fix and re-run.")
+        return EXIT_ERROR
     return EXIT_OK
 
 

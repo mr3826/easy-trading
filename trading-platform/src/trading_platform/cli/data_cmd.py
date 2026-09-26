@@ -19,7 +19,7 @@ from trading_platform.cli._common import (
 from trading_platform.research.data_quality import (
     STATUS_FAIL,
     STATUS_PASS,
-    MembershipManifestError,
+    format_membership_build_result,
     run_preflight_for_paths,
     write_membership_manifest_file,
 )
@@ -28,22 +28,19 @@ from trading_platform.research.data_quality import (
 def cmd_build_membership(args: argparse.Namespace) -> int:
     try:
         stats = write_membership_manifest_file(args.csv, args.output, source=args.source)
-    except (MembershipManifestError, OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:  # ValueError: manifest, JSON-decode, Unicode-decode errors
         print(f"ERROR: {exc}")
         return EXIT_DATA_FAILED
-    print(f"OK symbols={stats['symbols']} entries={stats['entries']} exits={stats['exits']} -> {args.output}")
-    if stats["exits"] == 0:
-        print(
-            "WARNING: manifest has zero membership exits — the preflight will fail it as "
-            "survivor-only data. This usually means the vendor export only contains "
-            "current constituents; obtain full historical membership including removals."
-        )
+    for line in format_membership_build_result(stats, args.output):
+        print(line)
     return EXIT_OK
 
 
 def cmd_preflight(args: argparse.Namespace) -> int:
     try:
-        report = run_preflight_for_paths(args.data_dir, args.benchmark, args.membership)
+        report, _bars, _bench_frame, _membership = run_preflight_for_paths(
+            args.data_dir, args.benchmark, args.membership
+        )
     except ValueError as exc:
         # MembershipManifestError and JSON decode errors (both ValueError).
         print(f"ERROR: invalid membership manifest: {exc}")
@@ -78,7 +75,7 @@ def add_subparser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
 
     pre = dsub.add_parser(
         "preflight",
-        help="fail-closed PIT data-quality gate (exit 0 PASS, 4 warnings, 2 FAIL, 3 external setup)",
+        help="fail-closed PIT data-quality gate (exit 0 PASS, 1 PASS_WITH_WARNINGS, 2 FAIL, 3 external setup)",
     )
     pre.add_argument("--data-dir", required=True, type=Path)
     pre.add_argument("--benchmark", required=True)

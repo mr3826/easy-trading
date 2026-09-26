@@ -182,6 +182,30 @@ T   doctor/E2E assertions were ambient-DATABASE_URL order-dependent; made
   converted into a labelled proxy; removed any route by which "convenience"
   (wrappers, run-all, exploratory mode) could mint eligibility.
 
+## Post-review hardening (six-track `/review branch` on this PR)
+
+A dedicated multi-track review (security / business logic / performance / deploy
+safety / duplication / dead code) was run on the branch. Boundary claims
+re-verified as airtight (non-PIT APPROVED downgrade, no live path, no secret
+leak); findings all fixed in follow-up commits:
+
+- Path traversal: membership/benchmark symbols now validated to ticker shape
+  before any filesystem-path use (manifest builder + loader + both research
+  entry points).
+- `build_dataset_manifest` no longer crashes on the legacy bare-list manifest
+  form the validator accepts (was an uncaught `AttributeError` bypassing the
+  exit-code contract).
+- `data preflight --help` now states the real exit contract (0/1/2/3).
+- Crashed families yield `RESEARCH_INCOMPLETE` + exit 1 (never a silent
+  `NO_STRATEGY_PROMOTED`), with attempted grids recorded as `NOT_ATTEMPTED`.
+- Preflight FAIL now persists a `DATA_FAILED` run record, so `status` never
+  shows stale green over a degraded dataset; `MvpState` trimmed to only states
+  the code can actually derive.
+- Duplicated membership-build error handling unified (shared report lines;
+  non-UTF-8 vendor files fail closed with exit 2 on both surfaces); single
+  `classify_run_verdict` decision tree; dead helpers removed; redundant frame
+  strip in the runner hoisted.
+
 ## Readiness
 
 ```text

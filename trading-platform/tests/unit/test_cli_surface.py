@@ -72,6 +72,15 @@ def test_build_membership_missing_csv_fails(tmp_path: Path, capsys: pytest.Captu
     assert "ERROR" in capsys.readouterr().out
 
 
+def test_build_membership_non_utf8_csv_fails_closed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Regression: undecodable vendor files must exit 2 with a clean error, not traceback."""
+    csv = tmp_path / "broken.csv"
+    csv.write_bytes(b"\xff\xfe\x00\x01not-utf8-at-all")
+    code = main(["data", "build-membership", "--csv", str(csv), "--output", str(tmp_path / "o.json")])
+    assert code == 2
+    assert "ERROR" in capsys.readouterr().out
+
+
 def test_preflight_writes_report_and_exits_pass(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     data = tmp_path / "bars"
     _bars(data)

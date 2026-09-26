@@ -7,12 +7,16 @@ engines (``research.data_quality``, ``research.dataset``, ``research.runner``,
 
 Hard rules enforced here:
 
-- a preflight FAIL stops research (nothing runs);
+- a preflight FAIL stops research (nothing runs) and the refusal is PERSISTED
+  as a ``DATA_FAILED`` run record so ``status`` never reports stale green;
 - PASS_WITH_WARNINGS only proceeds with an explicit human acknowledgement,
   which is persisted into the dataset manifest, every family report's
   metadata and known-biases, and the final summary;
+- a family that crashes yields ``RESEARCH_INCOMPLETE`` (non-zero exit), never
+  a silent ``NO_STRATEGY_PROMOTED``; attempted grids are recorded even then;
 - the run is pinned to a dataset fingerprint + git commit + policy hash;
-- "no strategy promoted" is a *successful* outcome, not an error.
+- "no strategy promoted" (all families judged and refused) is a *successful*
+  outcome, not an error.
 """
 
 from __future__ import annotations
@@ -31,8 +35,12 @@ from trading_platform.research.data_quality import (
     STATUS_FAIL,
     STATUS_PASS_WARNINGS,
     Membership,
+    MembershipManifestError,
+    load_bar_frames,
+    load_membership_manifest,
     membership_on,
     run_data_preflight,
+    validate_symbol,
 )
 from trading_platform.research.dataset import build_dataset_manifest
 from trading_platform.research.runner import run_family_research
@@ -49,8 +57,15 @@ VERDICT_REJECTED = "REJECTED"
 VERDICT_RESEARCH_ONLY = "RESEARCH_ONLY"
 VERDICT_ERROR = "ERROR"
 
-# Exit codes for ``trading-platform research run-all`` (documented in docs/MVP1.md).
-EXIT_OK = 0
+# Run-level verdicts (single source: classify_run_verdict / run_mvp_research).
+FINAL_APPROVED = "STRATEGY_APPROVED_FOR_SHADOW"
+FINAL_RESEARCH_ONLY = "RESEARCH_ONLY_CANDIDATES"
+FINAL_INCOMPLETE = "RESEARCH_INCOMPLETE"
+FINAL_NONE_PROMOTED = "NO_STRATEGY_PROMOTED"
+FINAL_DATA_FAILED = "DATA_FAILED"
+
+# Exit codes for ``trading-platform research`` (numerically aligned with the
+# CLI display constants in ``cli._common``; documented in docs/MVP1.md).
 EXIT_ERROR = 1
 EXIT_DATA_FAILED = 2
 EXIT_EXTERNAL = 3
@@ -58,18 +73,21 @@ EXIT_WARNINGS_UNACKNOWLEDGED = 4
 
 
 class MvpState(str, Enum):
-    """Deterministic high-level product state (docs/MVP1.md)."""
+    """Deterministic high-level product state (docs/MVP1.md).
+
+    Every member is actually derivable from persisted evidence or config;
+    shadow/paper/live boundaries are printed by ``status`` as fixed policy
+    text, not as states this application transitions through.
+    """
 
     NOT_CONFIGURED = "NOT_CONFIGURED"
     REQUIRES_EXTERNAL_DATA = "REQUIRES_EXTERNAL_DATA"
     DATA_FAILED = "DATA_FAILED"
     DATA_READY = "DATA_READY"
-    RESEARCH_RUNNING = "RESEARCH_RUNNING"
+    RESEARCH_INCOMPLETE = "RESEARCH_INCOMPLETE"
     NO_STRATEGY_PROMOTED = "NO_STRATEGY_PROMOTED"
     STRATEGY_RESEARCH_ONLY = "STRATEGY_RESEARCH_ONLY"
     STRATEGY_APPROVED_FOR_SHADOW = "STRATEGY_APPROVED_FOR_SHADOW"
-    SHADOW_REQUIRES_FORWARD_EVIDENCE = "SHADOW_REQUIRES_FORWARD_EVIDENCE"
-    PAPER_REQUIRES_EXTERNAL_SETUP = "PAPER_REQUIRES_EXTERNAL_SETUP"
     NOT_AUTHORIZED_LIVE = "NOT_AUTHORIZED_LIVE"
 
 
@@ -123,16 +141,6 @@ class MvpRunError(RuntimeError):
         self.exit_code = exit_code
 
 
-def load_bar_frames(data_dir: Path, symbols: Sequence[str]) -> Dict[str, pd.DataFrame]:
-    """Load the bar frames that actually exist in ``data_dir`` for ``symbols``."""
-    frames: Dict[str, pd.DataFrame] = {}
-    for symbol in symbols:
-        path = data_dir / f"{symbol}.parquet"
-        if path.exists():
-            frames[symbol] = pd.read_parquet(path)
-    return frames
-
-
 def resolve_mvp_state(output_root: Path, data_dir: Optional[Path], membership: Optional[Path]) -> MvpState:
     """Derive the product state from configuration + the latest run evidence."""
     latest = latest_summary(output_root)
@@ -140,12 +148,7 @@ def resolve_mvp_state(output_root: Path, data_dir: Optional[Path], membership: O
         summary = latest
         if summary.get("data_quality", {}).get("verdict") == STATUS_FAIL:
             return MvpState.DATA_FAILED
-        promoted = [f for f in summary.get("families", []) if f.get("verdict") == VERDICT_APPROVED]
-        if promoted:
-            return MvpState.STRATEGY_APPROVED_FOR_SHADOW
-        if any(f.get("verdict") == VERDICT_RESEARCH_ONLY for f in summary.get("families", [])):
-            return MvpState.STRATEGY_RESEARCH_ONLY
-        return MvpState.NO_STRATEGY_PROMOTED
+        return _STATE_BY_FINAL_VERDICT[classify_run_verdict(summary.get("families", []))]
     if data_dir is None or membership is None:
         return MvpState.NOT_CONFIGURED
     if not data_dir.exists() or not membership.exists():
@@ -153,8 +156,27 @@ def resolve_mvp_state(output_root: Path, data_dir: Optional[Path], membership: O
     return MvpState.DATA_READY
 
 
-def output_root_default() -> Path:
-    return Path("artifacts") / "research"
+def classify_run_verdict(families: Sequence[Mapping[str, Any]]) -> str:
+    """ONE decision tree for the run-level verdict (status, summary, exit codes).
+
+    A crashed family makes the run INCOMPLETE — never a silent NO_STRATEGY_-
+    PROMOTED, which is defined as "the policy judged and refused everything".
+    """
+    if any(f.get("verdict") == VERDICT_APPROVED for f in families):
+        return FINAL_APPROVED
+    if any(f.get("verdict") == VERDICT_ERROR for f in families):
+        return FINAL_INCOMPLETE
+    if any(f.get("verdict") == VERDICT_RESEARCH_ONLY for f in families):
+        return FINAL_RESEARCH_ONLY
+    return FINAL_NONE_PROMOTED
+
+
+_STATE_BY_FINAL_VERDICT = {
+    FINAL_APPROVED: MvpState.STRATEGY_APPROVED_FOR_SHADOW,
+    FINAL_INCOMPLETE: MvpState.RESEARCH_INCOMPLETE,
+    FINAL_RESEARCH_ONLY: MvpState.STRATEGY_RESEARCH_ONLY,
+    FINAL_NONE_PROMOTED: MvpState.NO_STRATEGY_PROMOTED,
+}
 
 
 def latest_summary(output_root: Path) -> Optional[Dict[str, Any]]:
@@ -192,8 +214,6 @@ def run_mvp_research(
     ``families`` restricts which researchable families run (same gates, same
     fingerprinting); default is every registered researchable family.
     """
-    from trading_platform.research.data_quality import MembershipManifestError, load_membership_manifest
-
     all_researchable = researchable_families()
     selected = list(all_researchable if families is None else families)
     unknown = sorted(set(selected) - set(all_researchable))
@@ -212,15 +232,19 @@ def run_mvp_research(
         )
     try:
         membership = load_membership_manifest(membership_path)
-    except (MembershipManifestError, ValueError, json.JSONDecodeError) as exc:
+    except ValueError as exc:  # MembershipManifestError / JSON decode errors fail closed
         raise MvpRunError(f"invalid membership manifest {membership_path}: {exc}", EXIT_DATA_FAILED) from exc
+    try:
+        bench = validate_symbol(benchmark)
+    except MembershipManifestError as exc:
+        raise MvpRunError(f"invalid benchmark symbol: {exc}", EXIT_ERROR) from exc
 
-    symbols = sorted({*membership, benchmark})
+    symbols = sorted({*membership, bench})
     bars = load_bar_frames(data_dir, symbols)
-    benchmark_frame = bars.pop(benchmark, None)
+    benchmark_frame = bars.pop(bench, None)
     if benchmark_frame is None:
         raise MvpRunError(
-            f"benchmark {benchmark} not found at {data_dir / (benchmark + '.parquet')} — supply benchmark "
+            f"benchmark {bench} not found at {data_dir / (bench + '.parquet')} — supply benchmark "
             "daily bars on the same trading calendar (REQUIRES_EXTERNAL_SETUP)",
             EXIT_EXTERNAL,
         )
@@ -231,27 +255,10 @@ def run_mvp_research(
         )
 
     preflight = run_data_preflight(bars, benchmark_frame, membership)
-    if preflight["status"] == STATUS_FAIL:
-        verdict = "DATA_QUALITY: FAIL — research refused"
-        raise MvpRunError(
-            "data preflight FAILED: "
-            + "; ".join(f"{c['name']}: {c['detail']}" for c in preflight["criticals"])
-            + f" — fix the dataset; do not run strategy research on it ({verdict})",
-            EXIT_DATA_FAILED,
-        )
-    if preflight["status"] == STATUS_PASS_WARNINGS and not accept_data_warnings:
-        raise MvpRunError(
-            "data preflight returned PASS_WITH_WARNINGS — every warning names a data defect and its "
-            "research consequence. Review them, then re-run with --accept-data-warnings to record "
-            "the acknowledgement. Warnings:\n"
-            + "\n".join(f"  - {w['name']}: {w['detail']}" for w in preflight["warnings"]),
-            EXIT_WARNINGS_UNACKNOWLEDGED,
-        )
-
     accepted = list(preflight["warnings"]) if preflight["status"] == STATUS_PASS_WARNINGS else []
     manifest = build_dataset_manifest(
         data_dir=data_dir,
-        benchmark=benchmark,
+        benchmark=bench,
         membership_path=membership_path,
         bars=bars,
         benchmark_frame=benchmark_frame,
@@ -266,6 +273,36 @@ def run_mvp_research(
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "data_preflight.json").write_text(json.dumps(preflight, indent=2, sort_keys=True), encoding="utf-8")
     (run_dir / "dataset_manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+
+    if preflight["status"] == STATUS_FAIL:
+        # Persist the refusal itself: status/doctor must be able to report
+        # DATA_FAILED against the current dataset instead of stale green evidence.
+        criticals = "; ".join(f"{c['name']}: {c['detail']}" for c in preflight["criticals"])
+        failed = _failed_data_summary(
+            run_id=run_id,
+            started_at=started_at,
+            manifest=manifest,
+            preflight=preflight,
+            membership_path=membership_path,
+            bench=bench,
+            reason=criticals,
+            run_dir=run_dir,
+        )
+        (run_dir / SUMMARY_JSON).write_text(json.dumps(failed, indent=2, sort_keys=True, default=str), encoding="utf-8")
+        (run_dir / SUMMARY_MD).write_text(render_mvp_summary(failed), encoding="utf-8")
+        raise MvpRunError(
+            "data preflight FAILED: " + criticals + f" — fix the dataset; do not run strategy research on it "
+            f"(failure record: {run_dir})",
+            EXIT_DATA_FAILED,
+        )
+    if preflight["status"] == STATUS_PASS_WARNINGS and not accept_data_warnings:
+        raise MvpRunError(
+            "data preflight returned PASS_WITH_WARNINGS — every warning names a data defect and its "
+            "research consequence. Review them, then re-run with --accept-data-warnings to record "
+            "the acknowledgement. Warnings:\n"
+            + "\n".join(f"  - {w['name']}: {w['detail']}" for w in preflight["warnings"]),
+            EXIT_WARNINGS_UNACKNOWLEDGED,
+        )
 
     if code_commit is None:
         try:
@@ -294,7 +331,9 @@ def run_mvp_research(
     for family in selected:
         grid = PARAM_GRIDS.get(family)
         if not grid:
-            family_results.append({"family": family, "verdict": VERDICT_ERROR, "reason": "no pinned parameter grid"})
+            family_results.append(
+                {"family": family, "verdict": VERDICT_ERROR, "trial_count": 0, "reason": "no pinned parameter grid"}
+            )
             continue
         try:
             report = run_family_research(
@@ -314,8 +353,29 @@ def run_mvp_research(
             )
         except Exception as exc:  # noqa: BLE001 - one family failing must not erase the others
             family_results.append(
-                {"family": family, "verdict": VERDICT_ERROR, "reason": f"{type(exc).__name__}: {exc}"}
+                {
+                    "family": family,
+                    "verdict": VERDICT_ERROR,
+                    "trial_count": len(grid),
+                    "reason": f"{type(exc).__name__}: {exc}",
+                }
             )
+            # Attempted (not completed) grids stay in the record: a crashed
+            # family must be distinguishable from a fully-judged rejection.
+            for params in grid:
+                experiments.append(
+                    {
+                        "family": family,
+                        "config_id": None,
+                        "params": dict(params),
+                        "status": "NOT_ATTEMPTED",
+                        "promotion": {},
+                        "metrics": {},
+                        "dataset_fingerprint": fingerprint,
+                        "source_commit": code_commit,
+                        "policy_hash": policy.policy_hash(),
+                    }
+                )
             continue
         verdict = family_verdict(report)
         best = _best_config(report)
@@ -364,6 +424,7 @@ def run_mvp_research(
             )
 
     approved = [f for f in family_results if f.get("verdict") == VERDICT_APPROVED]
+    final_verdict = classify_run_verdict(family_results)
     summary: Dict[str, Any] = {
         "mvp_research_version": MVP_RESEARCH_VERSION,
         "run_id": run_id,
@@ -376,7 +437,7 @@ def run_mvp_research(
             "sha256": manifest["membership"]["sha256"],
             "source": manifest["membership"]["source"],
         },
-        "benchmark": benchmark,
+        "benchmark": bench,
         "date_range": manifest["date_range"],
         "symbols": manifest["symbols"],
         "n_warnings": len(accepted),
@@ -401,15 +462,7 @@ def run_mvp_research(
         },
         "families": family_results,
         "promoted": [f["family"] for f in approved],
-        "final_verdict": (
-            "STRATEGY_APPROVED_FOR_SHADOW"
-            if approved
-            else (
-                "RESEARCH_ONLY_CANDIDATES"
-                if any(f.get("verdict") == VERDICT_RESEARCH_ONLY for f in family_results)
-                else "NO_STRATEGY_PROMOTED"
-            )
-        ),
+        "final_verdict": final_verdict,
         "next_action": _next_action(family_results, bool(accepted)),
         "live_status": load_config().live_status,
         "run_dir": str(run_dir),
@@ -418,6 +471,57 @@ def run_mvp_research(
     (run_dir / SUMMARY_JSON).write_text(json.dumps(summary, indent=2, sort_keys=True, default=str), encoding="utf-8")
     (run_dir / SUMMARY_MD).write_text(render_mvp_summary(summary), encoding="utf-8")
     return summary
+
+
+def _failed_data_summary(
+    *,
+    run_id: str,
+    started_at: datetime,
+    manifest: Mapping[str, Any],
+    preflight: Mapping[str, Any],
+    membership_path: Path,
+    bench: str,
+    reason: str,
+    run_dir: Path,
+) -> Dict[str, Any]:
+    """Minimal persisted record when the data gate refuses research.
+
+    Written so ``status``/``doctor`` can derive ``DATA_FAILED`` against the
+    current dataset instead of reporting a stale passing run.
+    """
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return {
+        "mvp_research_version": MVP_RESEARCH_VERSION,
+        "run_id": run_id,
+        "started_at": started_at.isoformat(timespec="seconds"),
+        "finished_at": now,
+        "source_commit": "unknown",
+        "dataset_fingerprint": str(manifest["dataset_fingerprint"]),
+        "membership": {
+            "file": membership_path.name,
+            "sha256": manifest["membership"]["sha256"],
+            "source": manifest["membership"]["source"],
+        },
+        "benchmark": bench,
+        "date_range": manifest["date_range"],
+        "symbols": manifest["symbols"],
+        "n_warnings": len(preflight.get("warnings", [])),
+        "warnings": list(preflight.get("warnings", [])),
+        "warnings_acknowledged": False,
+        "data_quality": {"verdict": preflight["status"], "version": preflight["version"]},
+        "promotion_policy": {"version": PromotionPolicy().version, "hash": PromotionPolicy().policy_hash()},
+        "backtest_config": _backtest_config_pins(),
+        "bootstrap": {"n_resamples": 0, "block_length": 0, "seed": 0},
+        "walk_forward": {"n_folds": 0, "min_train": 0, "embargo": 0, "anchored": True},
+        "families_requested": [],
+        "metric_notes": {},
+        "families": [],
+        "promoted": [],
+        "final_verdict": FINAL_DATA_FAILED,
+        "next_action": ("Fix the dataset — research was refused and nothing ran. Criticals: " + reason),
+        "live_status": load_config().live_status,
+        "run_dir": str(run_dir),
+    }
 
 
 def run_single_family_research(
@@ -442,16 +546,20 @@ def run_single_family_research(
 
     if family not in PARAM_GRIDS:
         raise MvpRunError(f"family {family!r} is not researchable; researchable: {researchable_families()}", EXIT_ERROR)
-    frames = load_bar_frames(data_dir, [*symbols, benchmark])
-    if benchmark not in frames:
-        raise _ESR(f"benchmark data not found for {benchmark} in {data_dir} (REQUIRES_EXTERNAL_SETUP)")
-    universe = {s: f for s, f in frames.items() if s != benchmark}
+    try:
+        bench = validate_symbol(benchmark)
+        frames = load_bar_frames(data_dir, [*symbols, bench])
+    except MembershipManifestError as exc:
+        raise MvpRunError(f"invalid symbol: {exc}", EXIT_ERROR) from exc
+    if bench not in frames:
+        raise _ESR(f"benchmark data not found for {bench} in {data_dir} (REQUIRES_EXTERNAL_SETUP)")
+    universe = {s: f for s, f in frames.items() if s != bench}
     if not universe:
         raise _ESR(f"no universe bar data found in {data_dir} (REQUIRES_EXTERNAL_SETUP)")
     report = run_family_research(
         family,
         universe,
-        frames[benchmark],
+        frames[bench],
         param_grid=PARAM_GRIDS[family],
         n_folds=n_folds,
         min_train=min_train,

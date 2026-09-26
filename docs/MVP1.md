@@ -108,7 +108,9 @@ thin backward-compatible wrappers over the same services.
 5. Runs all registered researchable families
    (`trend_relative_strength`, `breakout_volume`, `trend_pullback`);
    `ma_cross_baseline` stays a registered control.
-6. Retains every attempted configuration (failed trials are data).
+6. Retains every attempted configuration (failed trials are data; a crashed
+   family still records its attempted grids as `NOT_ATTEMPTED` and yields
+   `RESEARCH_INCOMPLETE`, never a silent rejection).
 7. Writes per-family JSON+Markdown reports, promotion decision artifacts,
    `experiments.json`, and `MVP_RESEARCH_SUMMARY.{json,md}`.
 8. Makes no recommendation the promotion gate did not support.
@@ -146,14 +148,19 @@ Artifacts are ignored by git except `artifacts/verification/` (CI evidence).
 ```text
 NOT_CONFIGURED                 → set TRADING_DATA_DIR / TRADING_MEMBERSHIP
 REQUIRES_EXTERNAL_DATA         → paths set but files missing (get licensed data)
-DATA_FAILED                    → preflight FAIL (fix the dataset)
+DATA_FAILED                    → preflight FAIL (fix the dataset; the refusal is
+                                 persisted as a run record so this state survives)
 DATA_READY                     → gate inputs present, no run yet
-RESEARCH_RUNNING               → transient during run-all
+RESEARCH_INCOMPLETE            → a family crashed; the gate never judged part
+                                 of the trial space (fix and re-run)
 NO_STRATEGY_PROMOTED           → run completed; policy rejected every family
 STRATEGY_RESEARCH_ONLY         → evidence insufficient to judge
 STRATEGY_APPROVED_FOR_SHADOW   → a config passed every promotion evidence class
-SHADOW_REQUIRES_FORWARD_EVIDENCE / PAPER_REQUIRES_EXTERNAL_SETUP / NOT_AUTHORIZED_LIVE
+NOT_AUTHORIZED_LIVE
 ```
+
+Shadow/paper/live boundaries are always printed by `status` as fixed policy
+text — they are not states this application transitions through.
 
 ## Exit codes (documented contract)
 
@@ -163,7 +170,7 @@ SHADOW_REQUIRES_FORWARD_EVIDENCE / PAPER_REQUIRES_EXTERNAL_SETUP / NOT_AUTHORIZE
 | doctor | `1` | hard failure (unwritable paths, unreachable configured DB, invalid manifest) |
 | doctor | `3` | MVP operation currently blocked (data not configured/found) |
 | data preflight | `0/1/2/3` | PASS / PASS_WITH_WARNINGS / FAIL / REQUIRES_EXTERNAL_SETUP |
-| research run, run-all | `1` | usage or unexpected error |
+| research run, run-all | `1` | usage or unexpected error, or a crashed family (`RESEARCH_INCOMPLETE`) |
 | research run-all | `2` | data FAIL / invalid manifest / refused non-PIT request |
 | research run-all | `3` | REQUIRES_EXTERNAL_DATA (files missing) |
 | research run-all | `4` | PASS_WITH_WARNINGS without `--accept-data-warnings` |
@@ -171,6 +178,8 @@ SHADOW_REQUIRES_FORWARD_EVIDENCE / PAPER_REQUIRES_EXTERNAL_SETUP / NOT_AUTHORIZE
 ## Failure states are first-class
 
 - Missing membership manifest → blocked (exit 3 with next-step text).
+- A preflight FAIL is itself persisted as a `DATA_FAILED` run record, so
+  `status` reflects the current dataset instead of a stale passing run.
 - Zero membership exits / static membership / invalid ranges → preflight FAIL.
 - OHLC violations, NaN/non-finite, off-calendar bars, timestamp violations,
   incompatible benchmark calendar → preflight FAIL, research refuses.

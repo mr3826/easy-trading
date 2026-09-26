@@ -26,20 +26,15 @@ def main() -> int:
     args = parser.parse_args()
 
     from trading_platform.cli._common import EXIT_DATA_FAILED
-    from trading_platform.research.data_quality import MembershipManifestError, write_membership_manifest_file
+    from trading_platform.research.data_quality import format_membership_build_result, write_membership_manifest_file
 
     try:
         stats = write_membership_manifest_file(args.csv, args.output, source=args.source)
-    except (MembershipManifestError, OSError, ValueError) as exc:
+    except (OSError, ValueError) as exc:  # ValueError: manifest, JSON-decode, Unicode-decode errors
         print(f"ERROR: {exc}")
         return EXIT_DATA_FAILED
-    print(f"OK symbols={stats['symbols']} entries={stats['entries']} exits={stats['exits']} -> {args.output}")
-    if stats["exits"] == 0:
-        print(
-            "WARNING: manifest has zero membership exits — the preflight will fail it as "
-            "survivor-only data. This usually means the vendor export only contains "
-            "current constituents; obtain full historical membership including removals."
-        )
+    for line in format_membership_build_result(stats, args.output):
+        print(line)
     return 0
 
 

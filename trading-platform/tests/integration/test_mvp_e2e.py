@@ -21,8 +21,9 @@ import pandas as pd
 import pytest
 from trading_platform.cli import main
 from trading_platform.cli.doctor_cmd import run_doctor
+from trading_platform.cli.status_cmd import build_status_payload
 from trading_platform.research.dataset import load_dataset_manifest
-from trading_platform.research.mvp import SUMMARY_JSON, run_mvp_research
+from trading_platform.research.mvp import SUMMARY_JSON, classify_run_verdict, run_mvp_research
 from trading_platform.validation import BootstrapConfig
 
 pytestmark = pytest.mark.integration
@@ -207,15 +208,7 @@ class TestHappyPath:
         assert summary["live_status"] == "NOT_AUTHORIZED"
         promoted = [f["family"] for f in summary["families"] if f["verdict"] == "APPROVED"]
         assert summary["promoted"] == promoted
-        assert summary["final_verdict"] == (
-            "STRATEGY_APPROVED_FOR_SHADOW"
-            if promoted
-            else (
-                "RESEARCH_ONLY_CANDIDATES"
-                if any(f["verdict"] == "RESEARCH_ONLY" for f in summary["families"])
-                else "NO_STRATEGY_PROMOTED"
-            )
-        )
+        assert summary["final_verdict"] == classify_run_verdict(summary["families"])
         for fam in summary["families"]:
             if fam["verdict"] == "REJECTED":
                 assert fam["rejection_reasons"], "rejections must always name reasons"
@@ -310,7 +303,10 @@ class TestWarningsAcknowledgement:
         assert code == 4
         out = capsys.readouterr().out
         assert "PASS_WITH_WARNINGS" in out and "--accept-data-warnings" in out
-        assert not output.exists() or not list(output.glob(f"*/{SUMMARY_JSON}"))
+        # no promoted summary, but the blocked attempt is on record
+        assert not list(output.glob(f"*/{SUMMARY_JSON}"))
+        refusal_dirs = [p for p in output.iterdir() if p.is_dir()]
+        assert refusal_dirs and (refusal_dirs[0] / "data_preflight.json").exists()
 
     def test_accepted_warnings_persist_and_no_promotion_succeeds(
         self, warn_env: tuple[Path, Path, Path], capsys: pytest.CaptureFixture[str]
@@ -342,9 +338,11 @@ class TestWarningsAcknowledgement:
         assert code == 0  # successful MVP execution even though nothing is promoted
         out = capsys.readouterr().out
         assert "DATA QUALITY: PASS_WITH_WARNINGS" in out
-        run_dirs = [p for p in output.iterdir() if p.is_dir()]
-        assert len(run_dirs) == 1
-        run = run_dirs[0]
+        # the unacknowledged attempt persisted refusal records but no summary;
+        # the acknowledged run is the only summary-bearing run
+        summary_dirs = [p for p in output.iterdir() if p.is_dir() and (p / SUMMARY_JSON).exists()]
+        assert len(summary_dirs) == 1
+        run = summary_dirs[0]
         ds = json.loads((run / "dataset_manifest.json").read_text(encoding="utf-8"))
         assert ds["warnings_acknowledgement"]["acknowledged"] is True
         assert ds["accepted_warnings"]
@@ -415,6 +413,15 @@ class TestFailClosed:
         )
         assert code == 2
         capsys.readouterr()
+        # the refusal itself is persisted: status must show DATA_FAILED, not stale evidence
+        run_dirs = [p for p in (tmp_path / "research").iterdir() if p.is_dir()]
+        assert len(run_dirs) == 1
+        failed = json.loads((run_dirs[0] / SUMMARY_JSON).read_text(encoding="utf-8"))
+        assert failed["final_verdict"] == "DATA_FAILED"
+        assert failed["data_quality"]["verdict"] == "FAIL"
+        assert (run_dirs[0] / "dataset_manifest.json").exists()
+        assert build_status_payload(tmp_path / "research")["mvp_state"] == "DATA_FAILED"
+        assert "RESEARCH_INCOMPLETE" not in (run_dirs[0] / "MVP_RESEARCH_SUMMARY.md").read_text(encoding="utf-8")
 
     def test_bad_ohlc_fails_gate(self, tmp_path: Path, capsys) -> None:
         data, manifest = _prepare(tmp_path, 240)

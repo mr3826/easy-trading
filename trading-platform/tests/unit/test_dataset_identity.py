@@ -183,3 +183,34 @@ def test_schema_version_constant_stable(tmp_path: Path) -> None:
     mem = _membership(tmp_path)
     payload = json.loads(mem["path"].read_text(encoding="utf-8"))
     assert payload["schema_version"] == MEMBERSHIP_SCHEMA_VERSION
+
+
+def test_bare_list_manifest_form_supported(tmp_path: Path) -> None:
+    """load_membership_manifest accepts a legacy bare-list manifest; the
+    fingerprint builder must handle the same accepted form without crashing."""
+    bars = _bars(tmp_path)
+    path = tmp_path / "m.json"
+    path.write_text(
+        json.dumps(
+            [
+                {"symbol": "AAA", "start": "2022-01-03", "end": "2022-01-07"},
+                {"symbol": "BBB", "start": "2022-01-03", "end": None},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    from trading_platform.research.data_quality import load_membership_manifest
+
+    membership = load_membership_manifest(path)
+    manifest = build_dataset_manifest(
+        data_dir=tmp_path,
+        benchmark="SPY",
+        membership_path=path,
+        bars={k: v for k, v in bars.items() if k != "SPY"},
+        benchmark_frame=bars["SPY"],
+        membership=membership,
+        preflight_report=_report(),
+    )
+    assert manifest["membership"]["n_entries"] == 2
+    assert manifest["membership"]["n_exits"] == 1
+    assert len(manifest["dataset_fingerprint"]) == 64

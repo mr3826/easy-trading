@@ -25,8 +25,6 @@ EXIT_WARNINGS_UNACKNOWLEDGED = 4
 # 0=PASS, 1=PASS_WITH_WARNINGS, 2=FAIL, 3=REQUIRES_EXTERNAL_SETUP.
 EXIT_PASS_WARNINGS = 1
 
-LEVELS = ("PASS", "FAIL", "BLOCKED", "WARN", "INFO")
-
 
 def env_path(name: str) -> Optional[Path]:
     """Environment-configured path, or None when unset/blank."""

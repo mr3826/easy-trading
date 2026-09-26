@@ -110,7 +110,34 @@ def test_resolve_state_from_latest_run(tmp_path: Path) -> None:
 def test_state_enum_is_closed_and_serializable() -> None:
     values = {s.value for s in MvpState}
     assert "NOT_AUTHORIZED_LIVE" in values and "REQUIRES_EXTERNAL_DATA" in values
+    assert "RESEARCH_INCOMPLETE" in values
     assert MvpState.NO_STRATEGY_PROMOTED.value == "NO_STRATEGY_PROMOTED"
+    # every member must be derivable from real evidence/config (no advertised dead states)
+    assert not any(str(s.value).startswith(("SHADOW_", "PAPER_", "RESEARCH_RUNNING")) for s in MvpState)
+
+
+def test_classify_run_verdict_single_decision_tree() -> None:
+    from trading_platform.research.mvp import (
+        FINAL_APPROVED,
+        FINAL_INCOMPLETE,
+        FINAL_NONE_PROMOTED,
+        FINAL_RESEARCH_ONLY,
+        classify_run_verdict,
+    )
+
+    assert classify_run_verdict([]) == FINAL_NONE_PROMOTED
+    assert classify_run_verdict([{"verdict": "REJECTED"}]) == FINAL_NONE_PROMOTED
+    assert classify_run_verdict([{"verdict": "REJECTED"}, {"verdict": "RESEARCH_ONLY"}]) == FINAL_RESEARCH_ONLY
+    # a crashed family dominates: "not judged" is never "judged and refused"
+    assert classify_run_verdict([{"verdict": "REJECTED"}, {"verdict": "ERROR"}]) == FINAL_INCOMPLETE
+    # but a genuine approval still leads
+    assert classify_run_verdict([{"verdict": "ERROR"}, {"verdict": "APPROVED"}]) == FINAL_APPROVED
+
+
+def test_resolve_state_reports_incomplete_run(tmp_path: Path) -> None:
+    summary = _summary("RESEARCH_INCOMPLETE", {"a": "ERROR", "b": "REJECTED"})
+    _persist(tmp_path, summary)
+    assert resolve_mvp_state(tmp_path, None, None) is MvpState.RESEARCH_INCOMPLETE
 
 
 def test_run_rejects_unknown_family_selection(tmp_path: Path) -> None:

@@ -103,8 +103,9 @@ def build_feature_frames(
     specs = sorted(spec_keys.values(), key=lambda s: s.fingerprint())
     out: Dict[str, pd.DataFrame] = {}
     for symbol, ohlc in ohlc_by_symbol.items():
-        ff = compute_features(strip_pit_metadata(ohlc), specs, symbol=symbol, benchmark=benchmark_close)
-        frame = strip_pit_metadata(ohlc).join(ff.frame)
+        clean = strip_pit_metadata(ohlc)
+        ff = compute_features(clean, specs, symbol=symbol, benchmark=benchmark_close)
+        frame = clean.join(ff.frame)
         out[symbol] = frame
     return out
 

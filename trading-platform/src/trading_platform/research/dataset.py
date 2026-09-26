@@ -86,7 +86,9 @@ def build_dataset_manifest(
     bench_path = data_dir / f"{benchmark}.parquet"
     manifest_path = membership_path
     manifest_text = json.loads(manifest_path.read_text(encoding="utf-8"))
-    n_entries = len(manifest_text.get("entries", manifest_text if isinstance(manifest_text, list) else []))
+    # load_membership_manifest accepts both dict-form and legacy bare-list manifests.
+    raw_entries = manifest_text.get("entries", []) if isinstance(manifest_text, dict) else manifest_text
+    n_entries = len(raw_entries) if isinstance(raw_entries, list) else 0
     components: Dict[str, Any] = {
         "version": DATASET_MANIFEST_VERSION,
         "data_dir": data_dir.name,
@@ -149,15 +151,9 @@ def load_dataset_manifest(path: Path) -> Dict[str, Any]:
     return payload
 
 
-def short_fingerprint(manifest: Mapping[str, Any]) -> str:
-    """First 12 hex chars of the dataset fingerprint, for run ids and tables."""
-    return str(manifest.get("dataset_fingerprint", "0" * 12))[:12]
-
-
 __all__ = [
     "DATASET_MANIFEST_VERSION",
     "build_dataset_manifest",
     "load_dataset_manifest",
     "sha256_file",
-    "short_fingerprint",
 ]

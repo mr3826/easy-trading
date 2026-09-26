@@ -40,7 +40,11 @@ under the canonical `trading-platform` CLI (`status`, `doctor`, `data`,
 `research`, `report`) with a fail-closed data gate, explicit warning
 acknowledgement, dataset fingerprinting, `research run-all` across registered
 families, cross-family `MVP_RESEARCH_SUMMARY` artifacts, and a deterministic
-product state model. Legacy scripts remain as thin wrappers. See
+product state model. Legacy scripts remain as thin wrappers. NOTE for tooling:
+`run_strategy_research.py` (exploratory, non-PIT) now reports `approved=NONE`
+for configurations that the promotion gate would previously have approved —
+non-PIT evidence can no longer mint paper-eligible APPROVED artifacts (intentional
+safety hardening, covered by regression tests). See
 [MVP1.md](MVP1.md) and [MVP1_READINESS.md](../MVP1_READINESS.md). Still: no
 strategy promoted, research evidence requires licensed external data, live
 NOT AUTHORIZED.
