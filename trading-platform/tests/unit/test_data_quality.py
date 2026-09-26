@@ -14,6 +14,8 @@ from trading_platform.research.data_quality import (
     STATUS_PASS,
     STATUS_PASS_WARNINGS,
     MembershipManifestError,
+    build_membership_manifest_from_csv,
+    build_membership_manifest_from_rows,
     load_membership_manifest,
     membership_on,
     run_data_preflight,
@@ -189,6 +191,40 @@ def test_membership_helpers_and_manifest_loading(tmp_path: Path) -> None:
     )
     with pytest.raises(MembershipManifestError):
         load_membership_manifest(manifest)
+
+
+def test_csv_builder_roundtrips_through_loader(tmp_path: Path) -> None:
+    csv_path = tmp_path / "m.csv"
+    csv_path.write_text(
+        "symbol,start,end\naapl,2022-01-03,\nbbb,2022-01-03,2022-06-01\nCCC,2022-02-01,NA\n",
+        encoding="utf-8",
+    )
+    manifest = build_membership_manifest_from_csv(csv_path, source="vendor export test")
+    assert manifest["source"] == "vendor export test"
+    out = tmp_path / "manifest.json"
+    out.write_text(json.dumps(manifest))
+    loaded = load_membership_manifest(out)
+    assert loaded["AAPL"] == [(date(2022, 1, 3), None)]
+    assert loaded["BBB"] == [(date(2022, 1, 3), date(2022, 6, 1))]
+    assert loaded["CCC"] == [(date(2022, 2, 1), None)]
+
+
+def test_csv_builder_rejects_bad_rows(tmp_path: Path) -> None:
+    with pytest.raises(MembershipManifestError):
+        build_membership_manifest_from_rows([{"symbol": "", "start": "2022-01-01"}])
+    with pytest.raises(MembershipManifestError):
+        build_membership_manifest_from_rows([{"symbol": "A", "start": "not-a-date"}])
+    with pytest.raises(MembershipManifestError):
+        build_membership_manifest_from_rows(
+            [
+                {"symbol": "A", "start": "2022-01-01", "end": "2022-06-01"},
+                {"symbol": "A", "start": "2022-05-01"},
+            ]
+        )
+    bad = tmp_path / "bad.csv"
+    bad.write_text("ticker,start\nX,2022-01-01\n", encoding="utf-8")
+    with pytest.raises(MembershipManifestError):
+        build_membership_manifest_from_csv(bad)
 
 
 def test_report_is_deterministic_and_json_safe() -> None:

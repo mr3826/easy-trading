@@ -28,7 +28,7 @@ import json
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Set, Tuple
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -72,30 +72,7 @@ def _to_date(value: Any) -> date:
     return pd.Timestamp(str(value)).date()
 
 
-def load_membership_manifest(path: Path) -> Membership:
-    """Load and structurally validate a PIT constituent-membership manifest.
-
-    Schema (JSON)::
-
-        {"schema_version": "1.0",
-         "entries": [{"symbol": "AAPL", "start": "2020-01-02",
-                       "end": "2023-05-01" | null}, ...]}
-
-    ``end`` null means the membership range is open (current constituent).
-    """
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    if isinstance(raw, dict):
-        if str(raw.get("schema_version")) != MEMBERSHIP_SCHEMA_VERSION:
-            raise MembershipManifestError(
-                f"schema_version must be {MEMBERSHIP_SCHEMA_VERSION!r}, got {raw.get('schema_version')!r}"
-            )
-        entries = raw.get("entries")
-        if not isinstance(entries, list):
-            raise MembershipManifestError("'entries' must be a list")
-    elif isinstance(raw, list):
-        entries = raw
-    else:
-        raise MembershipManifestError("manifest must be a list or {'entries': [...]} object")
+def _validate_entries(entries: List[Any]) -> Membership:
     out: Membership = {}
     for i, item in enumerate(entries):
         if not isinstance(item, dict):
@@ -120,6 +97,76 @@ def load_membership_manifest(path: Path) -> Membership:
                 raise MembershipManifestError(f"overlapping membership ranges for {symbol}")
         out[symbol] = ordered
     return out
+
+
+def load_membership_manifest(path: Path) -> Membership:
+    """Load and structurally validate a PIT constituent-membership manifest.
+
+    Schema (JSON)::
+
+        {"schema_version": "1.0",
+         "entries": [{"symbol": "AAPL", "start": "2020-01-02",
+                       "end": "2023-05-01" | null}, ...]}
+
+    ``end`` null means the membership range is open (current constituent).
+    """
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(raw, dict):
+        if str(raw.get("schema_version")) != MEMBERSHIP_SCHEMA_VERSION:
+            raise MembershipManifestError(
+                f"schema_version must be {MEMBERSHIP_SCHEMA_VERSION!r}, got {raw.get('schema_version')!r}"
+            )
+        entries = raw.get("entries")
+        if not isinstance(entries, list):
+            raise MembershipManifestError("'entries' must be a list")
+    elif isinstance(raw, list):
+        entries = raw
+    else:
+        raise MembershipManifestError("manifest must be a list or {'entries': [...]} object")
+    return _validate_entries(entries)
+
+
+def build_membership_manifest_from_rows(rows: Sequence[Mapping[str, Any]], *, source: str = "") -> Dict[str, Any]:
+    """Convert vendor rows (symbol/start[/end]) into a schema-valid manifest dict.
+
+    Blank/``NA``/``null`` ends become open-ended membership. Symbols are
+    upper-cased; malformed dates raise. The result loads through
+    :func:`load_membership_manifest`, which re-validates overlaps and ranges.
+    """
+    entries: List[Dict[str, Any]] = []
+    for i, row in enumerate(rows):
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if not symbol:
+            raise MembershipManifestError(f"row {i}: missing symbol")
+        try:
+            start = _to_date(row["start"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MembershipManifestError(f"row {i}: invalid start: {exc}") from exc
+        end_raw = row.get("end")
+        end: Optional[date] = None
+        if end_raw is not None and str(end_raw).strip() not in ("", "null", "None", "NA", "N/A", "-"):
+            try:
+                end = _to_date(end_raw)
+            except (TypeError, ValueError) as exc:
+                raise MembershipManifestError(f"row {i}: invalid end: {exc}") from exc
+        entries.append({"symbol": symbol, "start": start.isoformat(), "end": end.isoformat() if end else None})
+    _validate_entries(entries)  # fail at build time, not at preflight time
+    manifest: Dict[str, Any] = {"schema_version": MEMBERSHIP_SCHEMA_VERSION, "entries": entries}
+    if source:
+        manifest["source"] = source
+    return manifest
+
+
+def build_membership_manifest_from_csv(csv_path: Path, *, source: str = "") -> Dict[str, Any]:
+    """Read a vendor CSV (header: symbol,start[,end]) into a manifest dict."""
+    import csv
+
+    with csv_path.open(newline="", encoding="utf-8-sig") as fh:
+        reader = csv.DictReader(fh)
+        if not reader.fieldnames or "symbol" not in [c.strip().lower() for c in reader.fieldnames]:
+            raise MembershipManifestError("CSV must have a 'symbol' header column")
+        normalized = ({str(k).strip().lower(): v for k, v in row.items() if k is not None} for row in reader)
+        return build_membership_manifest_from_rows(list(normalized), source=source or csv_path.name)
 
 
 def membership_on(membership: Membership, day: date) -> Set[str]:

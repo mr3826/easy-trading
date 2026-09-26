@@ -39,3 +39,8 @@ uv run python scripts/run_data_preflight.py \
 Only after PASS (or consciously-accepted warnings) does `run_strategy_research.py` become
 meaningful; feed the same manifest as `universe_membership` there to lift the
 survivorship evidence ceiling.
+
+What to procure, in what format, and the traps (current-constituents-only exports,
+missing delisted prices): see [DATA_SOURCING.md](DATA_SOURCING.md). Membership manifests
+are built from vendor CSVs by `scripts/build_membership_manifest.py`, which validates
+through the same loader the preflight uses and warns on `exits=0` (survivor-only export).
