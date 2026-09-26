@@ -29,3 +29,8 @@ Reconciliation pass (2026-09-25): stale Phases 7–12 checklist reconciled to re
 the research path fixed; `monitoring/paper_evidence.PaperEvidenceTracker` added; PIT
 universe-membership filtering supported in the research runner; debug scratch archived to
 `archive/legacy-scratch/`.
+
+Data-quality gate (2026-09-26): `research/data_quality.py` + `scripts/run_data_preflight.py`
+refuse non-PIT datasets (missing/invalid constituent membership manifest, survivorship
+red flags, bar integrity) **before** any strategy research. See
+[DATA_PIPELINE.md](DATA_PIPELINE.md).
