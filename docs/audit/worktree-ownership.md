@@ -34,3 +34,7 @@ These files were already modified (uncommitted) at session start and were subseq
 - untracked scratch: `analyze_*.py`, `fix_*.py`, `show_*.py`, `count_errors.py`, `check_ruff.py`, `extract_errors.py`, `mypy_*.txt`, `ruff_*.txt`
 
 Decision: tracked debris committed in its pre-final state as-is (no content removal); untracked scratch left untracked and excluded from lint collection. Full patch backups are deliberately outside the public repository.
+
+Update 2026-09-25: the tracked root debris above was moved (git mv, history preserved) to
+`archive/legacy-scratch/` with its own provenance README; canonical behavior coverage lives
+in `trading-platform/tests/`. Untracked scratch remains untracked.

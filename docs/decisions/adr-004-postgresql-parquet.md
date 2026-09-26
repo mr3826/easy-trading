@@ -1,7 +1,7 @@
 # ADR-004: PostgreSQL + Parquet Persistence
 
 ## Status
-Proposed
+Accepted — implemented and CI-verified (2026-09-25)
 
 ## Context
 The platform needs a persistence layer for orders, fills, positions, risk decisions, journal, configuration, and model metadata. Market and research data must be versioned and immutable.

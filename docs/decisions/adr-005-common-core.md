@@ -1,7 +1,7 @@
 # ADR-005: Common Core Architecture
 
 ## Status
-Proposed
+Accepted — implemented and CI-verified (2026-09-25)
 
 ## Context
 The platform must run the same strategy, risk, OMS, event, and portfolio code in every environment (simulation, shadow, paper, live). Only data and execution adapters change.
