@@ -14,6 +14,7 @@
 
 | Topic | Document |
 |---|---|
+| **MVP-1 product (operator entry point)** | **[MVP1.md](MVP1.md)**, [MVP1_READINESS.md](../MVP1_READINESS.md) |
 | Current verified state | [current-state-audit.md](current-state-audit.md), [audit/current-state.md](audit/current-state.md) |
 | Architecture | [ARCHITECTURE.md](ARCHITECTURE.md), [architecture-overview.md](architecture-overview.md) |
 | Research method | [STRATEGY_RESEARCH_METHOD.md](STRATEGY_RESEARCH_METHOD.md), [research-methodology.md](research-methodology.md) |
