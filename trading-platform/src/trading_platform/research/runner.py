@@ -29,8 +29,10 @@ import pandas as pd
 
 from trading_platform.features.indicators import compute_features
 from trading_platform.promotion import (
+    STATUS_APPROVED,
     PromotionPolicy,
     evaluate_promotion,
+    mark_research_only,
     persist_decision,
 )
 from trading_platform.regimes import RegimeEngine
@@ -266,6 +268,11 @@ def run_family_research(
         bootstrap=bootstrap,
     )
 
+    # Universe point-in-time status governs whether an APPROVED artifact may be
+    # minted at all: survivorship-biased (non-PIT) evidence can never create
+    # paper eligibility downstream. Computed before the decision loop.
+    pit_universe = universe_is_point_in_time or universe_membership is not None
+
     for i, result in enumerate(config_results):
         report = validate_configuration(
             result,
@@ -277,6 +284,13 @@ def run_family_research(
         if len(param_objects) < 2:
             policy = PromotionPolicy(**{**vars(policy), "require_parameter_stability": False})
         decision = evaluate_promotion(family_name, report, policy, family_diagnostics=family_diag)
+        if decision.status == STATUS_APPROVED and not pit_universe:
+            decision = mark_research_only(
+                family_name,
+                report,
+                "non-PIT universe: survivorship-biased evidence cannot mint paper eligibility "
+                "(promotion downgraded to RESEARCH_ONLY)",
+            )
         decision_dict = decision.to_dict()
         report["promotion"] = decision_dict
         per_config_reports.append(report)
@@ -287,7 +301,6 @@ def run_family_research(
         key=lambda r: r.get("metrics", {}).get("sharpe", float("-inf")),
         default=None,
     )
-    pit_universe = universe_is_point_in_time or universe_membership is not None
     summary = {
         "family_id": family_id,
         "family_name": family_name,

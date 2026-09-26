@@ -118,3 +118,53 @@ def test_load_universe_requires_setup(tmp_path: Path) -> None:
     (tmp_path / "data").mkdir()
     with pytest.raises(ExternalSetupRequired):
         load_parquet_universe(tmp_path / "data", ["SPY"])
+
+
+@pytest.mark.integration
+def test_non_pit_evidence_cannot_mint_paper_eligibility(tmp_path: Path, monkeypatch) -> None:
+    """Security boundary (regression): an APPROVED verdict computed on a
+    survivorship-biased (non-PIT) universe is downgraded to RESEARCH_ONLY and
+    can never persist the artifact kind the paper orchestrator trusts."""
+    import trading_platform.research.runner as runner
+    from trading_platform.promotion import PromotionDecision
+
+    def fake_approved(*args, **kwargs):  # simulate every promotion class passing
+        return PromotionDecision(
+            status="APPROVED",
+            strategy_id="family",
+            config_id="cfg",
+            reasons=(),
+            policy_hash="p",
+            report_hash="r",
+            decided_at="2026-01-01T00:00:00+00:00",
+        )
+
+    monkeypatch.setattr(runner, "evaluate_promotion", fake_approved)
+    universe, benchmark = _universe()
+    grid = [{"momentum_window": 63, "rs_window": 63}, {"momentum_window": 126, "rs_window": 126}]
+    common = dict(
+        param_grid=grid,
+        n_folds=2,
+        min_train=500,
+        embargo=10,
+        bootstrap=BootstrapConfig(n_resamples=30, block_length=10, seed=7),
+        promotions_root=tmp_path / "promotions",
+    )
+    report = runner.run_family_research("trend_relative_strength", universe, benchmark, **common)
+    assert report["promotion_summary"]["approved"] == []
+    for cfg in report["config_reports"]:
+        assert cfg["promotion"]["status"] == "RESEARCH_ONLY"
+        assert "survivorship" in " ".join(cfg["promotion"]["reasons"])
+    artifacts = list((tmp_path / "promotions").glob("**/*.json"))
+    assert artifacts
+    for path in artifacts:
+        assert json.loads(path.read_text())["status"] != "APPROVED"
+
+    # PIT membership lifts the ceiling: the same passing evidence persists as
+    # APPROVED (real gates still run in production; this isolates the wiring).
+    membership = {d: sorted(universe) for d in benchmark.index}
+    report2 = runner.run_family_research(
+        "trend_relative_strength", universe, benchmark, universe_membership=membership, **common
+    )
+    assert report2["promotion_summary"]["approved"]
+    assert any(json.loads(p.read_text())["status"] == "APPROVED" for p in (tmp_path / "promotions").glob("**/*.json"))
