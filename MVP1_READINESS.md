@@ -18,7 +18,7 @@ Statuses: `READY` | `READY_WITH_EXTERNAL_INPUT` | `BLOCKED` | `NOT_REQUIRED_MVP1
 | Promotion gate | READY | policy-versioned, immutable artifacts, multi-evidence AND, fails closed on missing evidence (E2E: short history never APPROVEDs; decision artifacts audited) | — |
 | Reports | READY | `MVP_RESEARCH_SUMMARY.{md,json}` with traceability fields, rejection reasons, known biases, evidence ceiling, next action; `report show` | — |
 | Safety | READY | live stays `NOT_AUTHORIZED` under env attacks; CLI imports no broker/OMS/risk modules (subprocess assertion); warning acknowledgement explicit + persisted; E2E proves no bypass | — |
-| CI | READY | branch/PR `Verification` workflow green expected; gates unchanged (cov≥80, critical≥90, ruff/format/mypy/pip-audit/gitleaks) | final PR run must be green before merge |
+| CI | READY | PR #7 `verify` checks **pass** at `a7ed4bb` (Python 3.12.14 clean runner): 386 passed, coverage 90.11% (≥80), critical set ≥90, pip-audit clean, gitleaks clean — https://github.com/mr3826/easy-trading/pull/7 | merge decision is human-owned; branch not self-merged |
 | Docs | READY | `docs/MVP1.md`, README, CURRENT_STATE, TESTING, DATA_SOURCING reconciled; exit codes documented | — |
 | External market data | BLOCKED | `doctor` → `MVP_STATUS=REQUIRES_EXTERNAL_DATA`; requirements precise in `docs/DATA_SOURCING.md` | licensed PIT bars + membership-with-exits + delistings (vendor procurement) |
 | Shadow readiness | READY_WITH_EXTERNAL_INPUT | shadow machinery complete + tested; entry requires an APPROVED promotion artifact (none exists) + forward evidence | no promoted strategy; elapsed forward time |
