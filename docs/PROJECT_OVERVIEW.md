@@ -23,6 +23,7 @@
 | Risk & safety | [RISK_MANAGEMENT.md](RISK_MANAGEMENT.md), [KILL_SWITCHES.md](KILL_SWITCHES.md), [SECURITY_MODEL.md](SECURITY_MODEL.md) |
 | Operations | [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md), [FAILURE_MODES.md](FAILURE_MODES.md), [DISASTER_RECOVERY.md](DISASTER_RECOVERY.md) |
 | Testing | [TESTING.md](TESTING.md) |
+| Data sourcing (external milestone) | [DATA_SOURCING.md](DATA_SOURCING.md) |
 | Honest limits | [LIMITATIONS.md](LIMITATIONS.md) |
 
 ## Status vocabulary used across docs
